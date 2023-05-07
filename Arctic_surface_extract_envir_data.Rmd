@@ -1,0 +1,334 @@
+---
+title: "Arctic_surface_extract_env_data"
+author: "Nathan R. Geraldi"
+date: "MAy 25, 2021"
+output: github_document
+---
+
+set table options
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## libraries
+```{r libraries, message=FALSE, warning=FALSE}
+
+library(fields)
+library(psych)
+library(tidyverse) 
+# for geo data
+library(ncdf4)  
+library(raster)
+library(stringr)
+library(mregions) 
+library(rgeos)
+library(rgdal)
+
+
+
+# library(worms) # used but not loaded
+```
+
+## functions
+```{r functions, message=FALSE, warning=FALSE}
+# function to remove rows with n number of NA's
+delete.na <- function(DF, n=0) {
+  DF[rowSums(is.na(DF)) <= n,]
+}
+
+## for raters that need to rotate
+## data from 0-360, need to rotate to -180 to 180
+inv_rotate <- function(r) {
+  xmin(r) <- 0
+  xmax(r) <- 360
+  r <- rotate(r)
+  xmin(r) <- 0
+  xmax(r) <- 360
+  r
+}
+
+```
+
+
+## define universal variables
+```{r define_universal}
+
+stud_pat<-"Arctic_surface"  # matches study specific title from pipe (begining of files).
+dir<-"/Users/nathangeraldi/Dropbox/"
+out_file<-"Documents/KAUST/eDNA/R/pipe_summary"
+# export  to project folder
+export_file<-"Documents/KAUST/eDNA/R/csv/"
+#  shared directory
+share_file<-"eDNA_Red_Sea_shared/data/"
+# plot export file
+plot_file<-"Documents/KAUST/eDNA/R/plots/Arctic_surface"
+#  name of data
+dat_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")  
+# name for dating info
+#dating_name<-paste(stud_pat,"_predicted_dating.csv",sep="")
+
+############
+################### set file path and name of sample data
+sam_file_path<-paste0(dir,"Documents/KAUST/eDNA/Samples_Data/Arctic surface/Arctic_surface_data_all.xlsx") ## set sample data file
+
+## location of geo layers
+geo_file=paste0(dir,"Global_databases")
+
+```
+
+
+## import data
+Sample data excel sheet see post_DADA2 rmd for details
+```{r import}
+# sample data -- will need Quality control !!! make sure sample_se make sense
+sheets <- openxlsx::getSheetNames(sam_file_path)
+sam_dat <- lapply(sheets,openxlsx::read.xlsx,xlsxFile=sam_file_path)  # mes1<-sam_dat[[2]]   names(mes1)  names(sam_dat)
+names(sam_dat) <- sheets   # add name to each list
+##    move to next .Rmd - nothing to do here
+# locations<-sam_dat[[n_primers+1]]  # isolate locations  ! double check depending
+sample_dat<-sam_dat$sample_data # isolate other data#  import taxonomy assigned to sequences    names(dat)
+
+##  Get post_dada2 data
+seq_dat<-data.table::fread(file=paste(dir,export_file,dat_name, sep=""), sep=",")
+```
+
+
+## define variables
+```{r def_var}
+## specific for this Rmd
+data<-sample_dat %>%  # 
+    filter(complete.cases(Lat)) %>% 
+   
+
+    # slightly move some points more to water
+  mutate(Lat=ifelse(sample_ID=="N10_0-1", 64.447339, Lat) )%>% 
+  mutate(Lon=ifelse(sample_ID=="N10_0-1", -50.256370, Lon) )%>% 
+           
+    mutate(Lat=ifelse(sample_ID=="D26X", 69.246825, Lat)) %>% 
+  mutate(Lon=ifelse(sample_ID=="D26X", -53.511605, Lon) )%>% 
+           
+    mutate(Lat=ifelse(sample_ID=="D9", 69.301801, Lat) )%>% 
+  mutate(Lon=ifelse(sample_ID=="D9", -53.881893, Lon) )%>% 
+           
+    mutate(Lat=ifelse(sample_ID=="Y4", 74.437219, Lat) )%>% 
+  mutate(Lon=ifelse(sample_ID=="Y4", -20.399630, Lon) )%>% 
+  
+      mutate(Lat=ifelse(sample_ID=="Stn2", 76.998901, Lat) )%>% 
+  mutate(Lon=ifelse(sample_ID=="Stn2", 16.022191, Lon) )%>% 
+  
+
+  
+         
+          distinct(Lat,Lon, .keep_all=TRUE) 
+
+names(data)
+
+geo_col<-c(6,5) # specify columns of Lat then Lon
+##  set xy - !!!!!!! longitude, latitude !!!!!!!!!!!!!!!
+xy<-data[,geo_col] ## lon, lat
+```
+
+
+## MSEC data
+from https://shiny.sesync.org/apps/msec/
+```{r MSEC}
+######   MSEC   human pop     ##################################
+setwd(paste0(geo_file,"/MSEC/ecy1884-sup-0002-DataS1"))
+rast_path<-paste0(geo_file,"/MSEC/ecy1884-sup-0002-DataS1/")
+files<-list.files(patter="*.nc")
+
+#####   get names from file name
+namess<-as.data.frame(files)
+namess<- namess %>%
+  dplyr::rename(file_name=files) %>% 
+  mutate(file_name=as.character(file_name))
+namess$file_name<-substr(namess$file_name,1,nchar(namess$file_name)-3)
+### specify files if needed
+ff<-c(1,3,5,8,10,11,14)  #  c(6:16)   i<-1
+f<-files[ff]
+cn<-namess$file_name[ff]
+###  start loop   i<-1
+# new data frame
+data1<-data
+
+for (i in seq_along(f)){
+  nam<-paste(cn[i])
+  x<- raster(paste0(rast_path,f[i]) )
+  x<-rotate(x)
+  data1$loopname<- raster::extract(x ,cbind(data1[,geo_col[1]], data1[,geo_col[2]]))
+  q<-length(names(data1))  # use for names
+  names(data1)[q] <- paste(nam)
+}
+
+data<-data1
+
+```
+
+
+
+
+from GMED data
+http://gmed.auckland.ac.nz/
+
+Bio-oracle is better for layers - all same year, seem to better update
+Do not use GMED, below is just example, but don't run (used for coral meta if want example)
+
+## GMED
+get depth layer and land_distance
+```{r depth}
+###### SST mean ##############################################################
+#setwd
+list.files(paste(geo_file,"/GMED", sep=""))
+land_distance <- raster(read.asciigrid(paste0(geo_file,"/GMED/land_distance/gb_land_distance.asc")) )
+#You can plot it to get an idea of the data:
+#  plot(sst_mean )   plot(xy, add=TRUE)
+#extract values from rater add values directly back to the original dataframe:
+data$land_distance  <- raster::extract(land_distance ,cbind(data[,geo_col[1]], data[,geo_col[2]] ))
+# then take the raster value with lowest distance to point AND non-NA value in the raster
+r<-land_distance 
+sampled = apply(X =xy , MARGIN = 1, FUN = function(xy) r@data@values[which.min(replace(distanceFromPoints(r, xy), is.na(r), NA))])
+data$land_distance_near<- do.call(rbind, lapply(sampled, as.numeric))
+```
+
+## bio-oracle_sruf 
+ref assis et al. data from 2000-2014 , 5 arc min
+```{r oracle}
+
+setwd(paste0(geo_file,"/Bio-oracle/Surface_present"))
+rast_path<-paste0(geo_file,"/Bio-oracle/Surface_present")
+files<-list.files(rast_path, pattern="*.asc")
+
+#####   get names from file name
+namess<-as.data.frame(files)
+namess<- namess %>%
+  dplyr::rename(file_name=files) %>% 
+  mutate(file_name=as.character(file_name)) %>% 
+  mutate(file_name=gsub(".asc" , "", file_name)) # remove .asc
+
+### specify files if needed
+ff<-c(2, 8:13, 15, 22, 24,27,29, 33, 35)  #  c(6:16)
+f<-files[ff]
+cn<-namess$file_name[ff]
+###  start loop    i<-1
+for (i in 1:length(f)){
+  nam<-paste(cn[i])
+  nam_n<-paste(cn[i],"_near")
+  x<- raster(read.asciigrid(paste0(rast_path,"/",f[i])))  # names(data)
+  data$loopname<- extract(x ,cbind(data$Lon, data$Lat))
+  q<-length(names(data))-1  # use for names
+  names(data) <- c(names(data[,1:q]), paste(nam)) 
+  
+  # then take the raster value with lowest distance to point AND non-NA value in the raster
+  r<-x
+  sampled = apply(X =xy , MARGIN = 1, FUN = function(xy) r@data@values[which.min(replace(distanceFromPoints(r, xy), is.na(r), NA))])
+  data$loopname<- do.call(rbind, lapply(sampled, as.numeric))
+  q<-length(names(data))-1  # use for names
+  names(data) <- c(names(data[,1:q]), paste(nam_n)) 
+  
+}
+###
+```
+
+
+## bio-oracle_benthic 
+ref assis et al. data from 2000-2014 , 5 arc min
+```{r oracle}
+
+setwd(paste0(geo_file,"/Bio-oracle/Surface_present"))
+rast_path<-paste0(geo_file,"/Bio-oracle/Benthic_present")
+files<-list.files(rast_path, pattern="*.asc")
+
+#####   get names from file name
+namess<-as.data.frame(files)
+namess<- namess %>%
+  dplyr::rename(file_name=files) %>% 
+  mutate(file_name=as.character(file_name)) %>% 
+  mutate(file_name=gsub(".asc" , "", file_name)) # remove .asc
+
+### specify files if needed
+ff<-c(2,5)  #  c(6:16)
+f<-files[ff]
+cn<-namess$file_name[ff]
+###  start loop    i<-1
+for (i in 1:length(f)){
+  nam<-paste(cn[i])
+  nam_n<-paste(cn[i],"_near")
+  x<- raster(read.asciigrid(paste0(rast_path,"/",f[i])))  # names(data)
+  data$loopname<- extract(x ,cbind(data$Lon, data$Lat))
+  q<-length(names(data))-1  # use for names
+  names(data) <- c(names(data[,1:q]), paste(nam)) 
+  
+  # then take the raster value with lowest distance to point AND non-NA value in the raster
+  r<-x
+  sampled = apply(X =xy , MARGIN = 1, FUN = function(xy) r@data@values[which.min(replace(distanceFromPoints(r, xy), is.na(r), NA))])
+  data$loopname<- do.call(rbind, lapply(sampled, as.numeric))
+  q<-length(names(data))-1  # use for names
+  names(data) <- c(names(data[,1:q]), paste(nam_n)) 
+  
+}
+###
+```
+
+
+## climate velocity anom
+```{r}
+#############################################################################################################################
+  ##########     vocc temperature velocities
+  #install.packages("devtools")
+  #library("devtools")
+  # 
+  ####     
+  # library("vocc")
+  #  library("hadsstr")  ##   hadsstr::load_hadsst
+
+  ########################################################################################################
+  ######  get mean temp and temp velocity     data is monthly
+  ##  use hadsstr   from jbyrnes
+vel_file<-paste0(dir,"Global_databases/SST_HadISST1") 
+  setwd(vel_file)  
+  # set coordinates
+  pt <- data %>% 
+    dplyr::select(Lon, Lat) %>%  # names(data)
+    rename(Longitude=Lon, Latitude=Lat)
+  crs.geo <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")  # geographical, datum WGS84 copy from summary
+coordinates(pt) <- c("Longitude","Latitude")  # c(x,y)
+proj4string(pt) <- crs.geo  
+  
+
+  files<-list.files(vel_file, patter="*.nc")    # 
+  x<- raster(paste0(vel_file,"/HadISST_sst.nc")  ) # summary(x)    
+  x<-hadsstr::load_hadsst(paste0(vel_file,"/HadISST_sst.nc")  )    # mes<-x@z$Date  last(mes)
+  xx<-hadsstr::get_all_rasters(x, years = 1980:2016)
+  voc<- extract(xx ,pt)  #
+  voc<-data.frame(voc) # names(voc)
+  data$linear_change_temp<-voc$linear_change
+  data$had_mean_temp<-voc$average_sst
+  # get nearest for velocity
+  r<-xx[[2]] # raster go from 1 to f for velocity
+  sampled = apply(X =xy , MARGIN = 1, FUN = function(xy) r@data@values[which.min(replace(distanceFromPoints(r, xy), is.na(r), NA))])
+  data$linear_change_near<- do.call(rbind, lapply(sampled, as.numeric))
+  # get nearest for mean temp
+    r<-xx[[1]] # raster go from 1 to f for velocity
+  sampled = apply(X =xy , MARGIN = 1, FUN = function(xy) r@data@values[which.min(replace(distanceFromPoints(r, xy), is.na(r), NA))])
+  data$had_mean_temp_near<- do.call(rbind, lapply(sampled, as.numeric))
+
+
+#############################################################################################################################
+```
+
+
+
+
+## export
+```{r export}
+
+data.table::fwrite(data,paste0(dir,export_file,stud_pat,"_eDNA_enviro_var.csv"),row.names=F, sep=",")
+
+
+```
+
+
+
+
+
+

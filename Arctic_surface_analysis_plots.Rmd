@@ -1,0 +1,2278 @@
+---
+title: "arctic_surface_map"
+author: "Nathan R. Geraldi"
+date: "May 21, 2021"
+output: github_document
+---
+
+set table options
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## libraries
+```{r libraries, message=FALSE, warning=FALSE}
+library(RColorBrewer)
+library(rdrop2)  # what is this used for?
+library(vegan)
+library(fields)
+library(psych)
+library(tidyverse) 
+library(broom)
+library("sf")
+#library("rgeos")
+library("rnaturalearth")
+library("rnaturalearthdata")
+library("grid")
+library("ggplot2") # install.packages("ggplot2")
+
+library("maps")
+library("sf")
+
+library("mapproj")
+
+
+select<-dplyr::select
+
+# gam related
+library(mgcv)
+library(tidymv)  # for plotting - plot_smooths()
+library(gratia) 
+```
+
+## functions
+```{r functions, message=FALSE, warning=FALSE}
+# function to remove rows with n number of NA's
+delete.na <- function(DF, n=0) {
+  DF[rowSums(is.na(DF)) <= n,]
+}
+
+
+##############################################################################
+## to both reverse and log transfom axis in ggplot, need scales package
+reverse_log_trans <- function(base = exp(1)) {
+    trans <- function(x) -log(x, base)
+    inv <- function(x) base^(-x)
+    scales::trans_new(paste0("reverselog-", format(base)), trans, inv, 
+              scales::log_breaks(base = base), 
+              domain = c(1e-100, Inf))
+}
+
+## same but for square root trans
+reverse_sqrt_trans <- function() {
+    scales::trans_new(
+        name = "rev_sqrt", 
+        transform = function(x) -sqrt(abs(x)), 
+        inverse = function(x) x^2);
+}
+
+
+## to do 
+### to improve multivariet plot add in this funtion from  https://stackoverflow.com/questions/10985224/r-heatmap-with-diverging-colour-palette/10986203#10986203
+# adds color and makes sure 0 is centereed
+diverge.color <- function(data,pal_choice="RdGy",centeredOn=0){
+  nHalf=50
+  Min <- min(data,na.rm=TRUE)
+  Max <- max(data,na.rm=TRUE)
+  Thresh <- centeredOn
+  pal<-brewer.pal(n=11,pal_choice)
+  rc1<-colorRampPalette(colors=c(pal[1],pal[2]),space="Lab")(10)
+  for(i in 2:10){
+    tmp<-colorRampPalette(colors=c(pal[i],pal[i+1]),space="Lab")(10)
+    rc1<-c(rc1,tmp)
+  }
+  rb1 <- seq(Min, Thresh, length.out=nHalf+1)
+  rb2 <- seq(Thresh, Max, length.out=nHalf+1)[-1]
+  rampbreaks <- c(rb1, rb2)
+  cuts <- classIntervals(data, style="fixed",fixedBreaks=rampbreaks)
+  return(list(cuts,rc1))
+}
+
+#  in my work I am using this scheme to plot a raster layer (rs) using spplot like so:
+#brks<-diverge.color(values(rs))
+#spplot(rs,col.regions=brks[[2]],at=brks[[1]]$brks,colorkey=TRUE))
+
+
+
+
+
+```
+
+## get_maps
+```{r get_maps}
+# define map
+world <- rnaturalearth::ne_countries(scale='medium',returnclass = 'sf') # 
+NorAm <- rnaturalearth::ne_countries(scale='large', continent = 'North America', returnclass = 'sf') #  unique(world$region_wb)   unique(world$continent)
+Eur <- rnaturalearth::ne_countries(scale='large', continent = 'Europe', returnclass = 'sf') #  
+gl <- rnaturalearth::ne_countries(scale='large', country = 'Greenland', returnclass = 'sf')
+il <-rnaturalearth::ne_countries(scale='large', country = 'Iceland', returnclass = 'sf')
+nor <-rnaturalearth::ne_countries(scale='large', country = 'Norway', returnclass = 'sf')
+
+
+
+
+
+```
+
+
+## define universal variables
+```{r define_universal}
+stud_pat<-"Arctic_surface"  # matches study specific title from pipe (begining of files).
+dir<-"/Users/nathangeraldi/Dropbox/"
+out_file<-"Documents/KAUST/eDNA/R/pipe_summary"
+# export  to project folder
+export_file<-"Documents/KAUST/eDNA/R/csv/"
+# plot export file
+plot_file<-"Documents/KAUST/eDNA/R/plots/Arctic_surface_june2022"
+
+# name for csv that you saved from post DADA2 filter
+export_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")
+
+## location of geo layers
+geo_file <- paste0(dir,"Global_databases")
+rast_path_bio <- paste0(geo_file,"/Bio-oracle/Surface_present")
+
+#  name of data
+dat_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")  
+
+
+## set some other universal variables
+####  !!!! need to be in alphabetical order - tabs in sam_file should match these names too !!!!! also have "type"" column
+primers<-c('18smini',"co1","euka02","euka03", "rbclmini")
+n_primers<-length(primers)
+## must be in alphabetical order
+minboots<-c("insect",50,70,90)  # for getting all data minboots and insect data
+min_insect_score<-0.80# set minimum score for insect taxa score
+
+################### set file path and name of sample data
+## each primer should have own sheet with name matching primers
+## primer sheets first then location sheet (1 row per each sample location), then other sheets with relevent data
+sam_file_path<-paste0(dir,"Documents/KAUST/eDNA/Samples_Data/Arctic surface/Arctic_surface_data_all.xlsx") ## set sample data file
+##
+
+
+# lineage names  !!!  used later check
+tl<-c("Superkingdom","Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+# get colors for 5 cores
+# brown to green - 
+cc1<-c('#543005','#8c510a','#bf812d','#dfc27d','#f6e8c3','#c7eae5','#80cdc1','#35978f','#01665e','#003c30', "black")
+cc2<-cc1[c(2,3:5,6,7:9,10)]
+
+# distinct colors - 15  - stacked box plots
+colo=c("#7f265b","#5dbb68","#58388b","#9eb13f","#677fd8","#ca913b","#bc80d5","#45bc8d","#c9417e","#36dee6","#ba4758","#758a3c","#c25bac","#b75636","#da75a0")
+#  pie(rep(1,n), col=colo) )
+
+## colors - wes anderson - color pallettes for maps
+pal<-wesanderson::wes_palette(name = "Zissou1", 100, type="continuous")
+
+pal3<-wesanderson::wes_palette(name = "Zissou1", 3, type="continuous")
+
+col_y_lab<-c(wesanderson::wes_palette("Moonrise2", n = 2), "black")
+
+##  deine plot names for regions on line 295
+
+
+```
+
+## import data
+
+```{r import}
+## import data
+
+# sample data -- will need Quality control !!! make sure sample_se make sense
+sheets <- openxlsx::getSheetNames(sam_file_path)
+sam_dat <- lapply(sheets,openxlsx::read.xlsx,xlsxFile=sam_file_path)  # mes1<-sam_dat[[2]]   names(mes1)  names(sam_dat)
+names(sam_dat) <- sheets   # add name to each list
+##    move to next .Rmd - nothing to do here
+# locations<-sam_dat[[n_primers+1]]  # isolate locations  ! double check depending
+sample_dat<-sam_dat$sample_data # isolate other data#  import taxonomy assigned to sequences    names(dat)
+
+##  Get post_dada2 data
+dat<-data.table::fread(file=paste0(dir,export_file,dat_name), sep=",")
+
+## get locations data
+locations<- data.table::fread(paste0(dir,export_file,stud_pat,"_eDNA_enviro_var.csv"),sep=",")
+
+
+## get sea distance among points - from "calc dist bet loc" chunk - see below
+dist_loc<-data.table::fread(paste0(dir,export_file,stud_pat,"_eDNA_dist_among_samples.csv"),sep=",")
+
+```
+
+    
+
+## get min read calcs
+```{r set_mins_divs}
+
+# fac includes -per sample     reads, mean hab reads ,rich, div
+
+####      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#   !!!!!!!!! take a look at rare_mins, most in cores have very low     !!!!!!!!!!!!!!!!!!!!
+####      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+### get summary number of reads per sample (only true samples).. for rarefy
+rare_mins<-dat %>%   # names(dat_filt_taxa_df)
+  filter(type=="sample") %>% 
+  select(primer_taxassign_id, sample_id_u, reads) %>% 
+  group_by(primer_taxassign_id,sample_id_u) %>% 
+  summarise(sum_sample=sum(reads)) %>% 
+  group_by(primer_taxassign_id) %>% 
+  summarise(min_sample=min(sum_sample),upper_quant=quantile(sum_sample, probs=0.75),  low_quant=quantile(sum_sample, probs=0.25), seventyfivepercent_lower=0.75*low_quant, fiftypercent_lower=0.50*low_quant, one_third_lower=0.333*low_quant, low_10percent=quantile(sum_sample, probs=0.10), lower_wisker= low_quant -( (upper_quant-low_quant)*0.5 ) , median=median(sum_sample), mean=mean(sum_sample),num_samp=n(),samp_below_quant= length(sum_sample[sum_sample<low_quant]), samp_below_75= length(sum_sample[sum_sample<seventyfivepercent_lower]), samp_below_50= length(sum_sample[sum_sample<fiftypercent_lower]), samp_below66 = length(sum_sample[sum_sample < one_third_lower]) , samp_below_10p= length(sum_sample[sum_sample<low_10percent]), samp_below_wisk= length(sum_sample[sum_sample<lower_wisker]))
+#   !!!!!!!!! take a look, most in cores have very low rare to 3000 remove any sample less than 1000
+# Feb 2021, try to automate rarefy decision.....
+#  seems like fair trade off between being too stringent for min. reads and removing samples with fewer reads than min ..
+#   use lower quartile (75% of samples) for minimum for rarefaction and then remove 10% of samples with low reads.
+##  this results in about 10% samples removed and 10% of samples have reads below rarefaction minumum.
+
+##   !!!!!!!!!!!!!!!!!!!
+#   set min and remove_sample
+#  min_num_rarefaction<-3000
+#   sample_read_min<-1000
+#  BETTER  !!!!!!    or set rare and min for each miseq run     # names(rare_mins)
+min_reads_min<-rare_mins[,c(1,4,6)]
+min_num_rarefaction<-as.vector(rare_mins$low_quant) 
+sample_read_min<-as.vector(rare_mins$fiftypercent_lower) 
+```
+
+
+## tidy
+
+```{r tidy}
+
+
+# get needed info from locations - data fro each core
+  loc1 <- locations %>% # names(locations)  names(loc1)
+    rename_all(tolower) %>% 
+    arrange(lat)  %>% 
+    mutate(sample_locations_num_lat=c(1:length(locations[,1]))) %>% 
+    # limit to 1st surface locations
+   # filter(miseq_run == "surface_1")  # unique(locations$miseq_run)
+  # limit to env data
+    dplyr::select(sample_id, lat,lon,msec_distmarket:sample_locations_num_lat) %>% 
+## change stupid names - fixed Oct 2022      unique(loc1$sample_id)
+     mutate(sample_id= gsub("Stn", "stn", sample_id))
+
+ 
+
+
+# add locations data to samples  
+# names(sample_dat)     names(sample_dat2) 
+  sample_dat2 <- sample_dat %>% 
+    rename_all(tolower) %>% 
+    rename(core="core#") %>% 
+   # fix depth
+    mutate(water_depth=as.numeric( sub(" .*", "", water_depth)) ) %>% 
+
+    ## limit to surface samples
+    filter(miseq_run=="surface_1" ) %>% # remove surface_1 !!!!! | miseq_run=="surface_2"
+    filter( site!="kelp farm") %>% # 152 samples
+    # keep only surface
+    filter(`slice.depth.(cm)`=="0-1" | `slice.depth.(cm)`=="0-5" | `slice.depth.(cm)`=="surface" ) %>%  # 143 surface only samples
+  left_join(dplyr::select(loc1,-lat,-lon  ), by= "sample_id"  ) %>% 
+         # limit to 1st surface locations !!!!
+    filter(miseq_run == "surface_1") %>%  # unique(locations$miseq_run)
+    
+      # make area catagories - west coastal, east coastal, open ocean, Svalbard coastal
+        mutate(area_cat_3=">50 km offshore") %>%   # hist(sample_dat2$land_distance_near[sample_dat2$land_distance_near <1])
+    mutate(area_cat_3=if_else(lon < (-40) & land_distance_near< 0.5  , "West GL", area_cat_3 )) %>% 
+   mutate(area_cat_3=ifelse(lon > (-40)  &   land_distance_near< 0.5 , "East GL and SVD", area_cat_3 )) %>% 
+    mutate(area_cat_3=factor(area_cat_3, levels=c("West GL","East GL and SVD", ">50 km offshore"))) %>% 
+  #    levels(sample_dat2$area_cat)
+         mutate(area_cat_2="East GL and SVD") %>% 
+    mutate(area_cat_2=if_else(lon < (-40) , "West GL", area_cat_2 )) %>% 
+    mutate(area_cat_2=factor(area_cat_2, levels=c("West GL","East GL and SVD"))) %>% 
+    arrange(desc(lat),sample_id) %>% 
+    mutate(sample_id_by_lat=1:length(.$sample_id)  ) %>% 
+    janitor::clean_names() 
+  
+    
+  unique(sample_dat2$sample_id)
+  mes<- sample_dat2 %>% 
+    filter(present_surface_temperature_mean_near>4)
+   #    hist(sample_dat2$land_distance_near)
+  
+  ###########################################################################3
+
+  ###      tidy sequence data
+ # unique(sample_age1$dating_type)
+dat_all<- dat %>%   # names(dat)   names(dat_all)  unique(dat$primer) unique(dat_all$sample_id)
+  filter(reads>0) %>% 
+  select(-lat,-lon) %>%   # remove lat and lon - add from sample_dat
+  mutate(type_3cat=forcats::fct_recode(type, "blank"="extraction blank", "blank" = "pcr blank", "mock" = "positive control")) %>% 
+  mutate(percent_reads=reads/sample_sum_after_filt*100)  %>% 
+  mutate(log_reads=log(reads+1), log_rare_reads=log(rare_reads+1), log_percent_reads=log(percent_reads+1) )  %>% 
+    mutate(primer=forcats::fct_recode(primer, "18S_V7"="euka02", "18S_V9"="18smini","CO1"="co1")) %>% # "18S_V4"="18s_stoeck"
+  mutate(primer=factor(primer,levels=c("18S_V7","18S_V9","CO1"))) %>%    # ,"18S_V4"
+   # limit to 1st surface locations
+    filter(miseq_run == "surface_1")  # unique(locations$miseq_run)
+# unique(dat_all$miseq_run) # unique(dat_all$sample_id)
+  
+
+  
+#    !!!!!!!!!!!!!!!!!!!!!!!!!   limit  ??????????????    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# final filtering, make df with 18s
+dat_all_filt <- dat_all %>%    # names(dat_all_filt)  names(dat_all)
+    filter(minboot==70) %>% 
+   filter(primer!="rbclmini") %>% 
+  filter(primer!="Vert") %>% 
+  filter(primer!="euka03") %>% 
+  filter(primer!="CO1") %>% 
+
+  #filter(grepl("18S", primer)) %>%   # "18S"  "18S_V9"
+  mutate(primer=factor(primer)) %>%   # levels(x$primer)
+  
+  # remove reps
+  filter(!grepl("rep", sample_id)) %>% 
+  # only samples
+  filter(type=="sample") %>% 
+  
+  # join with sample data    names(sample_dat2)
+  left_join(sample_dat2[,c(1:6,27:72)]) %>% 
+  rename(depth=water_depth) %>% 
+
+    ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ## remove samples with minimal reads   !!!!!!!!!!!!!!!!!!!!!!!!!
+  left_join(min_reads_min)  %>%  # names(min_reads_min)
+  filter(sample_sum_after_filt>fiftypercent_lower) %>% 
+  select(-low_quant, -fiftypercent_lower )  %>% 
+  
+    ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ## change % reads to rarefied % !!!!!!!  !!!!!!!!!!!!!!!!!!!!!!!!!
+  group_by(sample_id, primer) %>% 
+  mutate(rare_reads_sum=sum(rare_reads)) %>% 
+  mutate(percent_reads = (rare_reads/rare_reads_sum)*100  )
+  # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  
+#  unique(dat_all_filt$sample_id)     lost only 1 sample
+
+######################################
+######################################
+# get list of samples that have both primers - some samples removed by low reads, then use below
+samples_both_prim <- dat_all_filt %>% 
+      distinct(primer,sample_id) %>% 
+      group_by(sample_id) %>% 
+      summarise(num_primers_sample=n()) %>% 
+      filter(num_primers_sample >1)
+
+
+# tidy above to make one df of all taxa present for both primers
+#    match by site/sample then get mean percent reads !!
+dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(dat_all_filt$primer) 
+  #  select
+  group_by(lineage, sample_id, type, date, lat, lon, depth) %>% # add year
+  summarize(percent_reads=sum(percent_reads/2), count_of_primers=n()  ) %>%  #  unique(dat_all_filt_combine_prim$count_of_primers) 
+  ungroup() %>% 
+  # remove next changed above for better
+ # mutate(percent_reads=ifelse(count_of_primers==1, percent_reads/2, percent_reads)) %>%   # make true percent, divide rest of percents by 2
+  arrange(sample_id) %>% 
+  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE) %>% 
+  # remove samples that don't have both primers
+  inner_join(select(samples_both_prim, sample_id)) 
+
+#  unique(dat_all_filt_combine_prim$sample_id)  
+
+```
+
+
+
+## euk by phylum
+
+```{r ??}
+#   use dat_all_filt
+#  pool to phylum  !!!!!   get only needed data - keys, phylums, reads
+euk_phylum<- dat_all_filt %>%  #  names(dat_all_filt)
+  # break out lineage
+  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  #
+  select(primer, primer_taxassign_id, sample_id,  sample_id_u, lat,lon,depth ,Phylum, reads, rare_reads, percent_reads ) %>% 
+  #  pool reads at phylum
+  group_by(primer, primer_taxassign_id,sample_id,   sample_id_u, lat,lon,depth ,Phylum,) %>% 
+  summarise(reads_new=sum(reads), rare_reads_new=sum(rare_reads), percent_reads= sum(percent_reads), rich_reads= length(reads[reads>0]), rich_rare_reads= length(reads[rare_reads>0]), n=n() ) %>% ## cannot use reads again or will mess up calcs - need new_
+  filter(Phylum !="NA") %>% 
+  ungroup() %>% 
+  rename(reads=reads_new, rare_reads = rare_reads_new) %>% 
+  droplevels()
+
+## rank phylum by %
+euk_phylum_rank <- euk_phylum %>%
+  group_by(Phylum) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter phyla to only include those with this many samples
+  pull(Phylum)
+
+##  determine how many phyla to include
+n<-15
+euk_phylum_rank<-euk_phylum_rank[1:n]
+
+## order by previous
+euk_phylum_top <- euk_phylum %>%
+  filter(Phylum %in% euk_phylum_rank) %>%
+  mutate(Phylum = factor(Phylum, levels = euk_phylum_rank)) %>%
+  arrange(Phylum) %>% 
+   ungroup() 
+  #mutate(ybp=as.integer(ybp))  # made some slices taht same !
+
+#########################################################
+#########################################################
+#   for  pooled primers   !!!!!
+#########################################################
+# use combined primers - removed samples that had only 1 primer
+
+# sum by selected lineage
+euk_phylum_combine_prim <- dat_all_filt_combine_prim %>%   # names(euk_phylum)  names(euk_phylum_combine_prim)
+  #  select
+  group_by(sample_id, lat,lon,depth, Phylum) %>% 
+  summarize(percent_reads=sum(percent_reads), count_of_primers=n()  ) %>% 
+  arrange(sample_id)
+
+## rank phylum by %
+euk_phylum_rank_combine_prim <- euk_phylum_combine_prim %>%
+  group_by(Phylum) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter phyla to only include those with this many samples
+  pull(Phylum)
+
+##  determine how many phyla to include
+n<-15
+euk_phylum_rank_combine_prim<-euk_phylum_rank_combine_prim[1:n]
+
+## order by previous
+euk_phylum_top_combine_prim <- euk_phylum_combine_prim %>%
+  filter(Phylum %in% euk_phylum_rank) %>%
+  mutate(Phylum = factor(Phylum, levels = euk_phylum_rank)) %>%
+  arrange(Phylum) %>% 
+   ungroup() 
+
+```
+
+
+## euk by order
+
+```{r ??}
+#   use dat_all_filt
+#  pool to order  !!!!!   get only needed data - keys, phylums, reads
+euk_order<- dat_all_filt %>%  #  names(dat_all_filt)
+  # break out lineage
+  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  #
+  select(primer, primer_taxassign_id, sample_id,  sample_id_u,lat,lon,depth ,Phylum:Order, reads, rare_reads, percent_reads ) %>% 
+  #  pool reads at genus
+  group_by( primer, primer_taxassign_id,sample_id,   sample_id_u,lat,lon,depth ,Phylum,Class, Order,) %>% 
+  summarise(reads_new=sum(reads), rare_reads_new=sum(rare_reads), percent_reads= sum(percent_reads), rich_reads= length(reads[reads>0]), rich_rare_reads= length(reads[rare_reads>0]), n=n() ) %>% ## cannot use reads again or will mess up calcs - need new_
+  filter(Order !="NA") %>% 
+  ungroup() %>% 
+  rename(reads=reads_new, rare_reads = rare_reads_new) %>% 
+  droplevels()
+
+## rank g by %
+euk_order_rank <- euk_order %>%
+  group_by(Phylum,Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Order)
+
+##  determine how many gto include
+n<-15
+euk_order_rank<-euk_order_rank[1:n]
+
+## order an dlimit by previous
+euk_order_top <- euk_order %>%
+  filter(Order %in% euk_order_rank) %>%
+  mutate(Order = factor(Order, levels = euk_order_rank)) %>%
+  arrange(Order) %>% 
+   ungroup() 
+  #mutate(ybp=as.integer(ybp))  # made some slices taht same !
+
+#########################################################
+#########################################################
+#   for  pooled primers   !!!!!
+#########################################################
+# use combined primers - removed samples that had only 1 primer
+
+# sum by selected lineage
+euk_order_combine_prim <- dat_all_filt_combine_prim %>%   # names(euk_phylum)  names(euk_phylum_combine_prim)
+  #  select
+  group_by(sample_id, lat,lon,depth, Phylum, Class, Order) %>% 
+  summarize(percent_reads=sum(percent_reads), count_of_primers=n()  ) %>% 
+  arrange(sample_id)
+
+## rank phylum by %
+euk_order_rank_combine_prim <- euk_order_combine_prim %>%
+  group_by(Phylum, Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter phyla to only include those with this many samples
+  pull(Order)
+
+##  determine how many phyla to include
+n<-15
+euk_order_rank_combine_prim<-euk_order_rank_combine_prim[1:n]
+
+## order by previous      unique(euk_order_top_combine_prim$Order)
+euk_order_top_combine_prim <- euk_order_combine_prim %>%
+  filter(Order %in% euk_order_rank) %>%
+  mutate(Order = factor(Order, levels = euk_order_rank)) %>%
+  arrange(Order) %>% 
+   ungroup() 
+
+#################################################################################################
+#####################################################33
+
+
+  
+```
+
+
+## euk by genus
+
+```{r ??}
+#   use dat_all_filt
+#  pool to phylum  !!!!!   get only needed data - keys, phylums, reads
+euk_genus<- dat_all_filt %>%  #  names(dat_all_filt)
+  # break out lineage
+  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  #
+  select(primer, primer_taxassign_id, sample_id,  sample_id_u,lat,lon,depth ,Phylum:Genus, reads, rare_reads, percent_reads ) %>% 
+  #  pool reads at genus
+  group_by( primer, primer_taxassign_id,sample_id,   sample_id_u,lat,lon,depth ,Phylum,Class, Order,Family,Genus) %>% 
+  summarise(reads_new=sum(reads), rare_reads_new=sum(rare_reads), percent_reads= sum(percent_reads), rich_reads= length(reads[reads>0]), rich_rare_reads= length(reads[rare_reads>0]), n=n() ) %>% ## cannot use reads again or will mess up calcs - need new_
+  filter(Genus !="NA") %>% 
+  ungroup() %>% 
+  rename(reads=reads_new, rare_reads = rare_reads_new) %>% 
+  droplevels()
+
+## rank g by %
+euk_genus_rank <- euk_genus %>%
+  group_by(Phylum,Class, Order,Family,Genus) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Genus)
+
+##  determine how many gto include
+n<-15
+euk_genus_rank<-euk_genus_rank[1:n]
+
+## order by previous
+euk_genus_top <- euk_genus %>%
+  filter(Genus %in% euk_genus_rank) %>%
+  mutate(Genus = factor(Genus, levels = euk_genus_rank)) %>%
+  arrange(Genus) %>% 
+   ungroup() 
+  #mutate(ybp=as.integer(ybp))  # made some slices taht same !
+
+#########################################################
+#########################################################
+#     pool primers   !!!!!
+#########################################################
+
+
+
+
+```
+
+
+
+## animal by order
+
+```{r ??}
+#   use dat_all_filt
+# limit to metaz and recalc percent, get richness and diversity
+#  pool to order  !!!!!   get only needed data - keys, phylums, reads
+
+
+
+## make pattern for filtering
+metaz_pat<-c("Annelida","Arthropoda","Chordata","Cnidaria","Ctenophora","Echinodermata","Gastrotricha","Mollusca","Nematoda","Orthonectida","Platyhelminthes","Porifera","Rotifera","Sipuncula","Tardigrada","Urochordata","Chaetognatha","Craniata","Nemertea","Bryozoa","Hemichordata","Brachiopoda","Entoprocta","Cephalochordata","Entoprocta","Gnathostomulida", "Xenacoelomorpha") 
+metaz_pat<-paste(metaz_pat, collapse = "|")
+
+
+
+# limit to metazoan phyla then get reads per sample and % per taxa
+metaz_order <- euk_order %>%   # names(euk_genus)  unique(dat3$habitat)
+  filter(grepl(metaz_pat, Phylum))  %>%  # limit to metaz phyla
+    filter(Order !="NA") %>% 
+  select(-rare_reads,-percent_reads, -rich_reads, -rich_rare_reads, -n) %>% 
+  #unite("lineage", Phylum:Order, sep = ";", remove = FALSE) %>% 
+  #group_by(primer, core, ybp) %>% 
+    #  pool reads at genus
+  group_by( primer, primer_taxassign_id,sample_id, sample_id_u,lat,lon,depth) %>% 
+  mutate(sum_metaz_reads = sum(reads)) %>% 
+  ungroup() %>% 
+  mutate(percent_reads = (reads / sum_metaz_reads)  * 100) %>% 
+  #  !!!!!!  remove if sample ahs less than 100 metazoan reads  !!!
+  filter(sum_metaz_reads >= 100) %>% 
+  #rename(reads=reads_new, rare_reads = rare_reads_new) %>% 
+  droplevels()
+
+## rank g by %
+metaz_order_rank <- metaz_order %>%
+  group_by(Phylum,Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 3) %>% # filter g to only include those with this many samples
+  pull(Order)
+
+##  determine how many to include
+n<-15
+metaz_order_rank<-metaz_order_rank[1:n]
+
+## order an dlimit by previous
+metaz_order_top <- metaz_order %>%
+  filter(Order %in% metaz_order_rank) %>%
+  mutate(Order = factor(Order, levels = metaz_order_rank)) %>%
+  arrange(Order) %>% 
+   ungroup() 
+  #mutate(ybp=as.integer(ybp))  # made some slices taht same !
+
+#########################################################
+#########################################################
+#   for  pooled primers   !!!!!
+#########################################################
+# use combined primers - removed samples that had only 1 primer
+
+# sum by selected lineage
+metaz_order_combine_prim <- euk_order_combine_prim %>%   # names(metaz_phylum)  names(metaz_phylum_combine_prim)
+  # limit to metazoan phylums
+    filter(grepl(metaz_pat, Phylum))  %>%  # limit to metaz phyla
+    filter(Order !="NA") %>% 
+  ungroup() %>% 
+  #  select
+  group_by(sample_id, lat,lon,depth) %>% 
+  
+    mutate(sum_metaz_reads = sum(percent_reads)) %>% 
+  ungroup() %>% 
+  mutate(percent_reads2 = (percent_reads/ sum_metaz_reads)  * 100 , count_of_primers=n() ) %>% 
+  #  !!!!!!  remove if sample ahs less than 100 metazoan reads  !!!
+  filter(sum_metaz_reads >= 1) %>% 
+  select(-percent_reads, -count_of_primers)  %>% 
+  rename(percent_reads = percent_reads2) %>% 
+  droplevels() %>% 
+  arrange(sample_id)
+
+## rank phylum by %
+metaz_order_rank_combine_prim <- metaz_order_combine_prim %>%
+  group_by(Phylum, Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 3) %>% # filter order to only include those with this many samples
+  pull(Order)
+
+##  determine how many phyla to include
+n<-15
+metaz_order_rank_combine_prim<-metaz_order_rank_combine_prim[1:n]
+
+## order by previous      unique(metaz_order_top_combine_prim$Order)
+metaz_order_top_combine_prim <- metaz_order_combine_prim %>%
+  filter(Order %in% metaz_order_rank) %>%
+  mutate(Order = factor(Order, levels = metaz_order_rank)) %>%
+  arrange(Order) %>% 
+   ungroup() 
+
+#################################################################################################
+#####################################################33
+
+
+  
+```
+
+
+
+## bar_phylum_3areas
+
+```{r stack}
+#       names(euk_phylum_top_combine_prim)    names(dat_p)    names(sample_dat2)
+
+dat_p<-euk_phylum_top_combine_prim %>% 
+    mutate(value=percent_reads) %>% 
+  left_join(dplyr::select(sample_dat2, area_cat_3, sample_id, msec_distmarket:sample_locations_num_lat, sample_id_by_lat)  )  %>%   # get sample dat
+  mutate (lat_fac=as.factor(lat) ) %>%   # levels(dat_p$lat_fac)
+  # oragnize sample_id by lat
+  arrange(desc(lat) ) %>% 
+  mutate(sample_id=factor(sample_id, unique(sample_id))) %>%   # levels(dat_p$sample_id)
+   mutate(lat_labels=as.character(round(lat, digits = 1))) %>% 
+  filter(complete.cases(area_cat_3)) %>% 
+  mutate(area_cat=factor(area_cat_3))
+  
+
+#   used for bars in Fig. 1 , combine in later chunk
+
+lat_bar_3areas_phylum  <-  ggplot(dat_p, aes(fill=Phylum, y=percent_reads , x=sample_id_by_lat ) ) +   # names(dat_p)
+    geom_bar(position="stack", stat="identity")  +
+    facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+    scale_x_reverse() +
+   #  scale_x_discrete(labels= dat_p$lat_labels, ) +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()  # classic -no grids or bw
+
+
+##   plot summary
+   ggsave(lat_bar_3areas_phylum , file=paste(dir,plot_file,"/bar_3area_lat_phylum.pdf",sep=""), width = 15, height = 18, units = "cm")
+
+
+```
+
+
+
+## bar_metaz_order_3areas
+
+```{r stack}
+#       names(euk_phylum_top_combine_prim)    names(dat_p)    names(sample_dat2)
+
+dat_p<-metaz_order_top_combine_prim %>% 
+    mutate(value=percent_reads) %>% 
+  left_join(dplyr::select(sample_dat2, area_cat_3, sample_id, msec_distmarket:sample_locations_num_lat, sample_id_by_lat)  )  %>%   # get sample dat
+  mutate (lat_fac=as.factor(lat) ) %>%   # levels(dat_p$lat_fac)
+  # oragnize sample_id by lat
+  arrange(desc(lat) ) %>% 
+  mutate(sample_id=factor(sample_id, unique(sample_id))) %>%   # levels(dat_p$sample_id)
+   mutate(lat_labels=as.character(round(lat, digits = 1))) %>% 
+  filter(complete.cases(area_cat_3)) %>% 
+  mutate(area_cat=factor(area_cat_3))
+  
+
+#   used for bars in Fig. 1 , combine in later chunk
+# choose either Phylum or Order
+lineage_fill<-"Order"
+
+lat_bar_3areas_metaz_order  <-  ggplot(dat_p, aes(fill=Order, y=percent_reads , x=sample_id_by_lat ) ) +   # names(dat_p)
+    geom_bar(position="stack", stat="identity")  +
+    facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+    scale_x_reverse() +
+   #  scale_x_discrete(labels= dat_p$lat_labels, ) +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()  # classic -no grids or bw
+
+
+##   plot summary
+   ggsave(lat_bar_3areas_metaz_order , file=paste(dir,plot_file,"/bar_3area_lat_metaz_order.pdf",sep=""), width = 15, height = 18, units = "cm")
+
+
+```
+
+
+## bar_dif_primer_phyl
+phylum
+for S1 change so has separate legends
+
+```{r stack_bar}
+#       names(euk_phylum_top)   names(sample_dat2)  names(dat_p)
+
+# get top n
+## rank g by %
+euk_phylum_rankp11 <- euk_phylum %>%
+  filter(primer=="18S_V7") %>% 
+  group_by(Phylum) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Phylum)
+##  determine how many gto include
+n<-15
+euk_phylum_rankp<-euk_phylum_rankp11[1:n]
+
+# limit data#######
+dat_p<- euk_phylum %>% 
+      left_join(select(sample_dat2, sample_id, sample_id_by_lat, area_cat_3) ) %>% 
+      filter(primer=="18S_V7") %>% 
+      droplevels() %>% 
+      filter(complete.cases(area_cat_3) ) %>% 
+ 
+    filter(Phylum %in% euk_phylum_rankp) %>%
+    mutate(Phylum = factor(Phylum, levels = euk_phylum_rankp)) %>%
+    arrange(Phylum) %>% 
+     ungroup() 
+
+ #  plot 
+     plot_V7  <-  ggplot(dat_p , aes(fill=Phylum, y=percent_reads , x=sample_id_by_lat  ) ) +   # 
+    geom_bar(position="stack", stat="identity")  +
+       facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+   scale_x_reverse() +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()   + # classic -no grids or bw
+    theme(legend.position="right" ) + # , legend.direction="vertical", panel.spacing = unit(0.3, "lines"))
+     guides( fill=guide_legend(ncol=1, bycol=TRUE, title.position = "top"))
+ 
+     
+     #######################################    
+  ## second primer   
+# get top n
+## rank g by %
+euk_phylum_rankp22 <- euk_phylum %>%
+  filter(primer=="18S_V9") %>% 
+  group_by(Phylum) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Phylum)
+##  determine how many gto include
+n<-15
+euk_phylum_rankp2<-euk_phylum_rankp22[1:n]
+
+# limit data#######
+dat_p<- euk_phylum %>% 
+      left_join(select(sample_dat2, sample_id, sample_id_by_lat, area_cat_3) ) %>% 
+      filter(primer=="18S_V9") %>% 
+      droplevels() %>% 
+      filter(complete.cases(area_cat_3) ) %>% 
+ 
+    filter(Phylum %in% euk_phylum_rankp2) %>%
+    mutate(Phylum = factor(Phylum, levels = euk_phylum_rankp2)) %>%
+    arrange(Phylum) %>% 
+     ungroup() 
+  
+     plot_V9  <-  ggplot(dat_p , aes(fill=Phylum, y=percent_reads , x=sample_id_by_lat  ) ) +   # 
+    geom_bar(position="stack", stat="identity")  +
+       facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+   scale_x_reverse() +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()   + # classic -no grids or bw
+    theme(legend.position="right", legend.direction="vertical" ) + #
+     guides(fill=guide_legend(ncol=1,bycol=TRUE, title.position = "top")  )
+
+## combien and save
+   fig_phylum  <-  ggpubr::ggarrange(plot_V7 +theme(legend.justification = "left") ,  plot_V9 +  ggpubr::rremove("ylab") , align = "hv" , nrow = 2, ncol=1 , labels = c("a", "b") ) 
+                       
+
+  ggsave(fig_phylum, file=paste(dir,plot_file,"/bar_phylum_primer_3areas.tiff",sep=""), width = 25, height = 25, units = "cm", dpi="print")  
+ 
+  
+##  basic overlap of 2 primers
+mes <- euk_phylum_rankp [euk_phylum_rankp %in%  euk_phylum_rankp2] # 11 same
+mes <-  unique (c(euk_phylum_rankp,euk_phylum_rankp2) )  # 19 unique
+  
+ euk_phylum_rankp [  ! (euk_phylum_rankp %in%  euk_phylum_rankp2)  ] # 
+
+length(euk_phylum_rankp11)
+length(euk_phylum_rankp22)
+euk_phylum_rankp11 [euk_phylum_rankp11 %in%  euk_phylum_rankp22] 
+ euk_phylum_rankp11 [  ! (euk_phylum_rankp11 %in%  euk_phylum_rankp22)  ]
+  euk_phylum_rankp22 [  ! (euk_phylum_rankp22 %in%  euk_phylum_rankp11)  ]
+   
+```   
+
+
+
+
+
+
+## bars order 3areas
+primers pooled
+figs 2 and Fig. S2
+```{r order_plot}
+
+#    names(euk_order_primer_top)  unique(euk_order_top_combine_prim$Order)
+
+
+# first primer
+dat_p<- euk_order_top_combine_prim  %>% 
+      left_join(select(sample_dat2, sample_id, sample_id_by_lat, area_cat_3) ) %>% 
+      droplevels() %>% 
+      filter(complete.cases(area_cat_3) )
+     
+
+     # from pylum
+ lat_bar_3areas_order  <-  ggplot(dat_p, aes(fill=Order, y=percent_reads , x=sample_id_by_lat ) ) +   # names(dat_p)
+    geom_bar(position="stack", stat="identity")  +
+    facet_wrap(~area_cat_3, scales="free", ncol=3) +
+    scale_fill_manual(values = colo) +
+    scale_x_reverse() +
+   #  scale_x_discrete(labels= dat_p$lat_labels, ) +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()  # classic -no grids or bw
+
+                    
+
+  ggsave(lat_bar_3areas_order, file=paste(dir,plot_file,"/bar_3area_lat_order.tiff",sep=""), width = 25, height = 25, units = "cm", dpi="print")  
+     
+```
+
+
+
+
+## bars order primer 3areas
+figs 2 and Fig. S2
+plot primers separatly
+```{r order_plot}
+
+#    names(euk_order_primer_top)    unique(euk_order_primer_top$primer) , unique(euk_order_primer_top$Order)
+
+# #######     first primer
+
+# get top n
+## rank g by %
+euk_order_rankp11 <- euk_order %>%
+  filter(primer=="18S_V7") %>% 
+  group_by(Phylum,Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Order)
+##  determine how many gto include
+n<-15
+euk_order_rankp1<-euk_order_rankp11[1:n]
+
+# limit data#######
+dat_p<- euk_order %>% 
+      left_join(select(sample_dat2, sample_id, sample_id_by_lat, area_cat_3) ) %>% 
+      filter(primer=="18S_V7") %>% 
+      droplevels() %>% 
+      filter(complete.cases(area_cat_3) ) %>% 
+ 
+    filter(Order %in% euk_order_rankp1) %>%
+    mutate(Order = factor(Order, levels = euk_order_rankp1)) %>%
+    arrange(Order) %>% 
+     ungroup() 
+
+ #  plot 
+     plot_V7  <-  ggplot(dat_p , aes(fill=Order, y=percent_reads , x=sample_id_by_lat  ) ) +   # 
+    geom_bar(position="stack", stat="identity")  +
+       facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+   scale_x_reverse() +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()   + # classic -no grids or bw
+    theme(legend.position="right" ) + # , legend.direction="vertical", panel.spacing = unit(0.3, "lines"))
+     guides( fill=guide_legend(ncol=1, bycol=TRUE, title.position = "top"))
+ 
+     
+     #######################################    
+  ## second primer   
+# get top n
+## rank g by %
+euk_order_rankp22 <- euk_order %>%
+  filter(primer=="18S_V9") %>% 
+  group_by(Phylum,Class, Order) %>%
+  summarise(max_reads = max(percent_reads),mean = mean(percent_reads), median=median(percent_reads), n = n()) %>%
+  arrange(desc(median)) %>%
+  filter( n > 10) %>% # filter g to only include those with this many samples
+  pull(Order)
+##  determine how many gto include
+n<-15
+euk_order_rankp2<-euk_order_rankp22[1:n]
+
+# limit data#######
+dat_p<- euk_order %>% 
+      left_join(select(sample_dat2, sample_id, sample_id_by_lat, area_cat_3) ) %>% 
+      filter(primer=="18S_V9") %>% 
+      droplevels() %>% 
+      filter(complete.cases(area_cat_3) ) %>% 
+ 
+    filter(Order %in% euk_order_rankp2) %>%
+    mutate(Order = factor(Order, levels = euk_order_rankp2)) %>%
+    arrange(Order) %>% 
+     ungroup() 
+
+  
+     plot_V9  <-  ggplot(dat_p , aes(fill=Order, y=percent_reads , x=sample_id_by_lat  ) ) +   # 
+    geom_bar(position="stack", stat="identity")  +
+       facet_wrap(~area_cat_3, scales="free", ncol=3) +
+  scale_fill_manual(values = colo) +
+   scale_x_reverse() +
+  labs(y = "Relative abundance (%)", x = "Sample")  +
+    coord_flip() +
+    theme_bw()   + # classic -no grids or bw
+    theme(legend.position="right", legend.direction="vertical" ) + #
+     guides(fill=guide_legend(ncol=1,bycol=TRUE, title.position = "top")  )
+
+## combien and save
+   fig_order  <-  ggpubr::ggarrange(plot_V7 +theme(legend.justification = "left") ,  plot_V9 +  ggpubr::rremove("ylab") , align = "hv" , nrow = 2, ncol=1 , labels = c("a", "b") ) 
+                       
+
+  ggsave(fig_order, file=paste(dir,plot_file,"/bar_order_primer_3areas.tiff",sep=""), width = 25, height = 25, units = "cm", dpi="print")  
+ 
+  
+  ### basics to compare primer paris 
+# mes <- euk_order_rankp [euk_order_rankp %in%  euk_order_rankp2] # 6 same
+#  mes <-  unique (c(euk_order_rankp,euk_order_rankp2) )  # 24 unique
+     
+
+length(euk_order_rankp11)
+length(euk_order_rankp22)
+euk_order_rankp11 [euk_order_rankp11 %in%  euk_order_rankp22] 
+ euk_order_rankp11 [  ! (euk_order_rankp11 %in%  euk_order_rankp22)  ]
+  euk_order_rankp22 [  ! (euk_order_rankp22 %in%  euk_order_rankp11)  ]
+
+```
+
+
+## base_map
+```{r ase_map}
+
+
+land_col<-"grey75"
+sea_col<-"grey98"
+# get colors for 5 cores
+cc1<-c('#543005','#8c510a','#bf812d','#dfc27d','#f6e8c3','#c7eae5','#80cdc1','#35978f','#01665e','#003c30', "black")
+cc2<-cc1[c(1,2,3:5,7:9,11)]
+cc3 <- pal[90]
+
+## create focal map   names(sample_dat2)
+focal_map_numbered <- ggplot(data = gl) +
+     geom_sf(fill = land_col, lwd = 0) +
+    geom_sf(data = il, fill = land_col, lwd = 0) +
+  geom_sf(data = Eur, fill = land_col, lwd = 0) +
+  
+      geom_point(data = sample_dat2, aes(x = lon, y = lat), color= cc3, pch=1, size = 1, stroke=0.5) + # color = miseq_run; stroke to increase lwd
+        # scale_color_manual(values=c("seagreen3")) + #
+  # mes<- sample_dat2[, c(1,76) ]
+   
+    ggrepel::geom_text_repel(data = sample_dat2, aes(x = lon, y = lat, label= sample_id_by_lat ), box.padding = 0.03,
+                             size = 2.3, segment.color = NA, force=0.1, force_pull=10) +
+  
+     coord_sf(xlim = c(-75, 30), ylim = c(58, 83)) +
+     xlab("Longitude")+ ylab("Latitude")  +
+    #  ggspatial::annotation_scale(location = "bl", width_hint = 0.5) +
+    theme(legend.position=c(0.80,0.33)) +
+     theme(panel.grid.major = element_line(colour = gray(0.2), linetype = "dashed", 
+         size = 0.0), panel.background = element_rect(fill = sea_col), 
+         panel.border = element_rect(fill = NA)) 
+## change projections  - to much trouble
+#focal_map + coord_map()
+#  focal_map + ggplot2::coord_quickmap()
+#  focal_map + ggplot2::coord_map("azequalarea")
+
+focal_map<- ggplot(data = gl) +
+     geom_sf(fill = land_col, lwd = 0) +
+    geom_sf(data = il, fill = land_col, lwd = 0) +
+  geom_sf(data = Eur, fill = land_col, lwd = 0) +
+  
+      geom_point(data = sample_dat2, aes(x = lon, y = lat), color= cc3, pch=1, size = 1, stroke=0.5) + # color = miseq_run; stroke to increase lwd
+        # scale_color_manual(values=c("seagreen3")) + #
+  
+  
+     coord_sf(xlim = c(-75, 30), ylim = c(58, 83)) +
+     xlab("Longitude")+ ylab("Latitude")  +
+    #  ggspatial::annotation_scale(location = "bl", width_hint = 0.5) +
+    theme(legend.position=c(0.80,0.33)) +
+     theme(panel.grid.major = element_line(colour = gray(0.2), linetype = "dashed", 
+         size = 0.0), panel.background = element_rect(fill = sea_col), 
+         panel.border = element_rect(fill = NA)) 
+
+
+#  ggsave(focal_map, file=paste0(dir,plot_file,"/Arctic_surface_base_map.tiff"), width = 18, height = 15, units = "cm", dpi="print")
+
+
+  
+```
+
+
+## richness_map
+```{r ase_map}
+
+
+land_col<-"grey75"
+sea_col<-"grey98"
+# get colors for 5 cores
+cc1<-c('#543005','#8c510a','#bf812d','#dfc27d','#f6e8c3','#c7eae5','#80cdc1','#35978f','#01665e','#003c30', "black")
+cc2<-cc1[c(1,2,3:5,7:9,11)]
+cc3 <- pal[90]
+
+## color
+pal<-wesanderson::wes_palette(name = "Zissou1", 100, type="continuous")
+
+dat_rich1 <- dat_all_filt_combine_prim %>% 
+    group_by(sample_id, lat, lon) %>% 
+    summarise( rich=n(), shannon = sum(  (-1*(log( (percent_reads) ))) * (percent_reads) )  ) 
+
+
+## create focal map   names(sample_dat2)
+diversity_map <- ggplot(data = gl) +
+     geom_sf(fill = land_col, lwd = 0) +
+    geom_sf(data = il, fill = land_col, lwd = 0) +
+  geom_sf(data = Eur, fill = land_col, lwd = 0) +
+  
+      geom_point(data = dat_rich1 , aes(x = lon, y = lat, colour= rich), pch=1, size = 2, stroke=0.5, alpha=0.75) +
+      scale_colour_gradientn(colours = pal, name = 'name') +
+   
+    #ggrepel::geom_text_repel(data = sample_dat2, aes(x = lon, y = lat, label= sample_id_by_lat ), box.padding = 0.03,
+   #                          size = 2.3, segment.color = NA, force=0.1, force_pull=10) +
+  
+     coord_sf(xlim = c(-75, 30), ylim = c(58, 83)) +
+     xlab("Longitude")+ ylab("Latitude")  +
+    #  ggspatial::annotation_scale(location = "bl", width_hint = 0.5) +
+    theme(legend.position=c(0.80,0.33)) +
+     theme(panel.grid.major = element_line(colour = gray(0.2), linetype = "dashed", 
+         size = 0.0), panel.background = element_rect(fill = sea_col), 
+         panel.border = element_rect(fill = NA)) 
+## change projections  - to much trouble
+#focal_map + coord_map()
+#  focal_map + ggplot2::coord_quickmap()
+#  focal_map + ggplot2::coord_map("azequalarea")
+
+
+  ggsave(diversity_map, file=paste0(dir,plot_file,"/Arctic_surface_diversity_map.tiff"), width = 18, height = 15, units = "cm", dpi="print")
+
+
+
+
+
+  
+```
+
+
+# env_map_rasters
+    do not use - can't overlap points and issues with values in Baltic sea
+    !!! set not to run
+```{r map_layers, eval=FALSE, include=FALSE}
+
+# set extent
+e <- extent(-75, 30, 58, 83)
+# get file names
+files<-list.files(rast_path_bio) 
+ff<-c(33,35,22,24,8,10,27)  #  c(6:16)
+f<-files[ff]
+
+# clean file names for titles
+namess<- as.data.frame(f) %>%
+  dplyr::rename(file_name=f) %>% 
+  mutate(file_name=as.character(file_name)) %>% 
+  mutate(file_name = substr(.$file_name,1,nchar(.$file_name)-4) ) #
+
+# get raster
+rast<- raster(read.asciigrid( paste0(rast_path_bio,"/Present.Surface.Temperature.Mean.asc") ) )
+# crop
+rast<- crop(rast, e)	
+rast_pts <- rasterToPoints(rast, spatial = TRUE)
+
+# Then to a 'conventional' dataframe
+rast_df  <- data.frame(rast_pts) # names(rast_df)  head(rast_df)
+colnames(rast_df)[1]<-"value"
+rm(rast_pts, rast)
+
+
+#   loop to extract data from multiple layers
+###  start loop    i<-1
+for (i in 1:length(f)){
+  
+  nam<-paste(namess$file_name[i])  # get name
+  # get raster
+  x<- raster(read.asciigrid(paste0(rast_path_bio,"/",f[i])))  # names(data)
+  # crop
+  x<- crop(x, e)	
+  x_pts <- rasterToPoints(x, spatial = TRUE)
+  # Then to a 'conventional' dataframe
+  x_df  <- data.frame(x_pts) # names(rast_df)  head(rast_df)
+  colnames(x_df)[1]<-"value"
+  x_df$variable<-nam
+  x_df$variable_num<-i
+  
+  if (i==1) { rast_df <- x_df } else {
+    rast_df<-rbind(rast_df,x_df)
+  }
+  
+}
+
+head(rast_df)
+
+
+## straight facet_wrapp cannot have different values !!!! - skip
+ggplot() +
+ geom_raster(data = rast_df , aes(x = x, y = y, fill = value), alpha=0.7) +  # aes(fill=factor(value),alpha=0.8)
+  #scale_fill_viridis() +
+  facet_wrap(~variable)
+
+##   need a function and next df
+#  https://stackoverflow.com/questions/17006251/vary-the-fill-scale-when-using-facet-wrap-and-geom-tile-together
+
+
+
+plot_func <- function(df, name) {
+  ggplot()+
+  #ggplot(data = df, aes(x = x, y = y, fill = value), alpha=0.7 ) +
+    geom_raster(data = df, aes(x = x, y = y, fill = value), alpha=0.7 ) +
+    scale_fill_gradientn(colours = pal, name = name)
+    
+   #scale_fill_continuous(name = name, type = "gradient") 
+}
+
+nested_tmp <- rast_df %>% 
+  # remove anythinkg less than 20 ppt- baltic messes up
+  group_by(variable_num) %>% 
+  nest() %>% 
+  mutate(plots = map2(data, variable_num, plot_func)) 
+
+gridExtra::grid.arrange(grobs = nested_tmp$plots, ncol=2)
+
+
+```
+
+
+# env maps-points
+    better than plot rasters
+
+```{r map_layers}
+
+# get data, then gather - by environmental variable, then plot each varaible
+
+# use     names(dat_plot)
+names(sample_dat2)
+
+dat_plot <- sample_dat2 %>% 
+  distinct(lat,lon, .keep_all=TRUE) %>% 
+  filter(complete.cases(lat))  %>% 
+    dplyr::select(lat,lon,water_depth, msec_distmarket, land_distance_near, present_surface_ice_cover_mean, present_surface_par_mean, present_surface_nitrate_mean,present_surface_primary_productivity_mean, present_surface_primary_productivity_range, present_surface_salinity_mean, present_surface_temperature_mean, present_surface_temperature_range,linear_change_near) %>% 
+  gather(key= "variable" , value="value", -lat, -lon) %>% 
+  mutate(variable=gsub("msec_" , "", variable)) %>% 
+  mutate(variable=gsub("_near" , "", variable)) %>% 
+  mutate(variable=gsub("surface_" , "", variable)) %>% 
+  mutate(variable=gsub("present_" , "", variable)) %>% 
+  mutate(variable=gsub("landarea_" , " land.", variable)) %>% 
+  mutate(variable=gsub("land_distance" , "land.dist", variable)) %>% 
+    mutate(variable=gsub("water_depth" , "water.dep.", variable)) %>% 
+  mutate(variable=gsub("par.mean" , "PAR.mean", variable)) %>% 
+  mutate(variable=gsub("distmarket" , "dist.mark", variable)) %>% 
+  mutate(variable=gsub("nitrate" , "nitr", variable)) %>% 
+  mutate(variable=gsub("linear_change" , "temp.rate", variable)) %>% 
+  mutate(variable=gsub("cover_mean" , "cover", variable)) %>% 
+  mutate(variable=gsub("primary_productivity." , " p.p.", variable)) %>% 
+  mutate(variable=gsub("temperature_" , " temp.", variable)) %>% 
+  mutate(variable=gsub("salinity_" , "salin.", variable)) %>% 
+  mutate(variable=gsub(" " , "", variable)) %>% 
+  # remove unwanted    unique(dat_plot$variable)
+  filter(variable != "dist.mark"  & variable != "p.p.range" & variable != "salin.mean"  & variable != "temp.range") %>% 
+  ungroup() %>% 
+  arrange(variable) %>% 
+  mutate(variable=factor(variable)) %>%   # unique(dat_plot$variable)
+  mutate(variable_num=as.numeric(variable)) 
+  
+
+##   need a function and next df
+#  https://stackoverflow.com/questions/17006251/vary-the-fill-scale-when-using-facet-wrap-and-geom-tile-together
+
+## color
+pal<-wesanderson::wes_palette(name = "Zissou1", 100, type="continuous")
+
+plot_func <- function(df, name) {
+  ggplot()+
+ 
+     # plot background map
+         geom_sf(data = gl, fill = land_col, lwd = 0) +
+        geom_sf(data = il, fill = land_col, lwd = 0) +
+        geom_sf(data = Eur, fill = land_col, lwd = 0) +
+    
+      geom_point(data = df, aes(x = lon, y = lat, colour= value), pch=1, size = 2, stroke=0.5, alpha=0.75) +
+      scale_colour_gradientn(colours = pal, name = name) +
+    
+   coord_sf(xlim = c(-75, 30), ylim = c(58, 83)) +
+     xlab("")+ ylab("")  +   #xlab("Longitude")+ ylab("Latitude") 
+    #  ggspatial::annotation_scale(location = "bl", width_hint = 0.5) +
+    theme(legend.position="right") +
+     theme(panel.grid.major = element_line(colour = gray(0.2), linetype = "dashed", 
+         size = 0.0), panel.background = element_rect(fill = sea_col), 
+         panel.border = element_rect(fill = NA),
+         #  axis labels and title
+         axis.text.x = element_blank(), axis.text.y = element_blank(), #
+         axis.title.x=element_blank(),axis.title.y=element_blank(),
+         # legend changes
+         legend.title = element_text(colour="black", size=10, face ="plain"), 
+         legend.text = element_text(colour="black", size=9, face="plain")
+        , legend.position = c(0.80,0.33) # bottom right is 1,0
+        
+        #,legend.key.height= unit(2, 'cm'),
+        #legend.key.width= unit(1, 'cm')
+        , legend.key.size = unit(0.30, "cm") # make legend smaller
+        
+         ) 
+
+}
+
+
+nested_tmp <- dat_plot %>% 
+  # remove anythinkg less than 20 ppt- baltic messes up
+  group_by(variable) %>%  # or variable_num and in map2
+  nest() %>% 
+  mutate(plots = map2(data, variable, plot_func)) 
+
+plot1 <- gridExtra::grid.arrange(grobs = nested_tmp$plots, ncol=3,  padding = unit(0.2, "line")  )
+
+# save
+ggsave(plot1, file=paste(dir,plot_file,"/Arctic_surf_maps_enviro.tiff",sep=""), width = 20, height = 16, units = "cm", dpi="print")
+
+
+
+```
+
+
+
+
+## comb map phylum bars_primers
+```{r map_bar_combine}
+
+
+#fig_1<-  ggpubr::ggarrange(lat_bar_primers_west , lat_bar_primers_east +  ggpubr::rremove("ylab") , nrow =1, common.legend = TRUE, legend="bottom",  labels = c("b","c")   )  
+      
+# font.label = list(size = 14, face = "bold", color ="red")
+
+
+fig_1<-  ggpubr::ggarrange(focal_map_numbered ,  lat_bar_3areas_phylum   ,  nrow = 2, ncol=1 , labels = c("a", "b") ) 
+                       
+
+ #     heights = c(2, 1) 
+ #   theme(plot.margin = unit(c(0.01,0.01,0.01,0.01), "lines")   )
+ #  + annotate("text", label = "Test", size = 4, x = 15, y = 5)  # add after facet wrap !!
+
+  ggsave(fig_1, file=paste(dir,plot_file,"/fig_1_map_and_bars.tiff",sep=""), width = 18, height = 23, units = "cm", dpi="print")
+
+```
+
+
+
+
+
+## calc dist bet loc
+from - https://stackoverflow.com/questions/55815748/calculate-distance-raster-avoiding-land
+
+SET not to run !!!!!
+
+```{r dist_bet_loc, eval=FALSE, include=FALSE}
+#  library(raster)
+# get land map and make raster
+library(maptools)
+data(wrld_simpl)
+r <- raster(xmn=-75, xmx=30, ymn=58, ymx=83, res=.02) # minimum is 0.02 or takes very long
+# rasterize map to get land
+r_base <- rasterize(wrld_simpl, r, field= -1)
+# r_base <- rasterize(gl, r, field= -1)
+
+## example and plot to visualize
+# point locations    
+xy <- data.frame(x=loc1$lon[27], y=loc1$lat[27])
+# make point a raster
+rr <- rasterize(xy, r_base, update=TRUE)
+# make raster of distnaces from points
+x <- gridDistance(rr, 1, omit=-1)
+
+# plot
+#  plot(x / 1000000)
+#  points(xy)
+
+
+###########
+### now for data
+# need loop to get distance matrix
+##  format lat and lon
+
+
+  # for test
+  loc2<-loc1  %>% 
+# slightly move some points more to water or if not will have NA's
+  mutate(lat=ifelse(sample_id=="N10_0-1", 64.447339, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="N10_0-1", -50.256370, lon) )%>% 
+    
+     mutate(lat=ifelse(sample_id=="N10_1-2", 64.450194, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="N10_1-2", -50.226738, lon) )%>% 
+
+    mutate(lat=ifelse(sample_id=="D26X", 69.231328, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="D26X", -53.482739, lon) )%>%  
+    
+       mutate(lat=ifelse(sample_id=="D27",  69.237006, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="D27", -53.469937, lon) )%>%    
+           
+    mutate(lat=ifelse(sample_id=="D9", 69.296705, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="D9", -53.904383, lon) )%>% 
+    
+        mutate(lat=ifelse(sample_id=="Y4", 74.248123, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="Y4", -20.083430, lon) )  %>% 
+           
+    mutate(lat=ifelse(sample_id=="Y5", 74.207060, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="Y5", -19.885676, lon) ) %>%  
+      
+          mutate(lat=ifelse(sample_id=="stn1", 77.791275, lat) )%>% 
+  mutate(lon=ifelse(sample_id=="stn1", 15.451272, lon) ) %>% 
+      
+   mutate(lat=ifelse(sample_id=="stn6", 76.794169, lat) )%>% 
+ mutate(lon=ifelse(sample_id=="stn6", 29.150381, lon) )
+
+    # slice_head(n=5)
+
+  pt <- loc2 %>% 
+    dplyr::select(lon, lat) %>%  # names(data)
+    rename(Longitude=lon, Latitude=lat)  
+  
+# make pt a coordinate form
+  crs.geo <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")  # geographical, datum WGS84 copy from summary
+coordinates(pt) <- c("Longitude","Latitude")  # c(x,y)
+proj4string(pt) <- crs.geo  # names(pt)
+   
+## start loop
+for (i in 1:length(pt$Longitude)){
+
+# get focal point to raster   
+xy <- data.frame(x=loc2$lon[i], y=loc2$lat[i])
+# make point a raster
+rr <- rasterize(xy, r_base, update=TRUE)
+# make raster of distances from points
+x <- gridDistance(rr, 1, omit=-1)
+## get raster value for each point
+  dis<- data.frame(extract(x ,pt) )  #
+  
+  ## make dataframe
+  dis1<- loc2 %>% 
+    select(sample_id,lat,lon) %>% 
+    mutate(distance=dis$extract.x..pt.) %>% 
+    mutate(origin_sample_id=loc2$sample_id[i])
+  
+if(i==1){ dis_out<-dis1 }else { dis_out<-rbind(dis_out,dis1)}
+  
+}
+  
+ 
+mes<- dis_out %>% 
+    filter(is.na(distance) )
+
+ 
+ data.table::fwrite(dis_out,paste0(dir,export_file,stud_pat,"_eDNA_dist_among_samples.csv"),row.names=F, sep=",")
+
+
+```
+
+
+## distance analysis similarity
+use distance among locations to look at changes in commu
+```{r dist_anal}
+# dist_loc
+sam5<- dat_all_filt_combine_prim %>% 
+  ungroup() %>% 
+  select(sample_id) %>% 
+  distinct(sample_id)
+  
+# tidy distances
+dist_loc1 <- dist_loc %>% 
+   mutate(sample_id_comp=paste(origin_sample_id,sample_id, sep=";") ) %>% 
+  mutate(key = paste0(pmin(origin_sample_id,sample_id), pmax(origin_sample_id,sample_id), sep = "")) %>% 
+  distinct(key, .keep_all = TRUE) %>% 
+  # limit to samples in sample_dat2
+  inner_join(sam5 ) %>% 
+  inner_join(sam5 , by=c("origin_sample_id" = "sample_id") ) 
+ 
+ ##########################  
+ # make disimilarity and tidy
+  # taxa in columns, samples in rows
+  dis_mat<- dat_all_filt_combine_prim %>%   # names(dat_all_filt_combine_prim)
+    ungroup() %>% 
+    select(lineage,sample_id, percent_reads) %>% 
+    spread(key=sample_id, value= percent_reads, fill = 0)
+## get names
+  nam_dis<-names(dis_mat[2:67])
+  nam_dis<-data.frame(sample_id=nam_dis, number=c(1:66))
+  # could use vegan::wisconsin to double standardize or use binary TRUE for pres/abs
+dissim<-  vegan::vegdist( log ( (dis_mat[,2:67]) +1), method="jaccard", binary=FALSE, diag=FALSE, upper=FALSE )
+   
+sp.mat<-as.matrix(dissim)  
+sp.mat1 <- which(upper.tri(sp.mat, diag = TRUE), arr.ind = TRUE)
+sp.mat2<- data.frame(cbind(sp.mat1, sp.mat[sp.mat1]) )
+
+dis_sp<- sp.mat2 %>% 
+  left_join(nam_dis, by=c("row"="number")  ) %>% 
+  rename(sample_id_1="sample_id") %>% 
+  left_join(nam_dis, by=c("col"="number")  ) %>% 
+  rename(sample_id_2="sample_id", taxa_dist="V3") %>% 
+  mutate(key = paste0(pmin(sample_id_1,sample_id_2), pmax(sample_id_1,sample_id_2), sep = ""))
+
+##
+# join distances and dissimilarity by site combinations
+sim_dist <- dist_loc1 %>%   # names(sim_dist)
+  left_join(dis_sp[,c(6,3)]) %>%  # names(dis_sp)
+  filter(complete.cases(taxa_dist)) %>% # some sites not in sample data
+  filter(sample_id != origin_sample_id)  # remove data for same sites
+
+
+
+
+```
+
+## plot_dis_dist
+
+```{r plot_dis_dist}
+names(sim_dist)
+
+plot_sim_dist <-  ggplot(sim_dist , aes(y=taxa_dist , x=distance/1000  ) ) + 
+    geom_point(size=2, shape=23) +
+    geom_smooth(method="gam") +
+  labs(y = "Dissimilarity (Jaccard index)", x = "Ocean distance between samples (km)")  +
+    theme_bw()   # classic -no grids or bw
+
+
+plot_sim_dist 
+ ggsave(plot_sim_dist, file=paste(dir,plot_file,"/dissim_dist_surface_samples.tiff",sep=""), width = 25, height = 18, units = "cm", dpi="print")
+
+
+```
+
+
+## spec accum
+```{r sp_accum}
+# same as for dist anal
+# both primers
+  dis_mat<- dat_all_filt_combine_prim %>%   # names(dat_all_filt_combine_prim)
+    ungroup() %>% 
+    select(lineage,sample_id, percent_reads) %>% 
+    spread(key=sample_id, value= percent_reads, fill = 0)
+
+    d1<-t(dis_mat[,2:67])  ##  colnames(all3)     z<-all3[,135:151]
+    df1<-  vegan::specaccum(d1, method="random",permutations = 1000)
+
+# each primer
+      # mini
+  dis_mat<- dat_all_filt %>%   # names(dat_all_filt)
+    ungroup() %>% 
+    filter(primer=="18S_V9") %>% 
+    select(lineage,sample_id, percent_reads) %>% 
+    spread(key=sample_id, value= percent_reads, fill = 0)
+  
+    d2<-t(dis_mat[,2:67])  ##  colnames(all3)     z<-all3[,135:151]
+    df2<-  vegan::specaccum(d2, method="random",permutations = 1000)
+    # euka02
+  dis_mat<- dat_all_filt %>%   # names(dat_all_filt)
+    ungroup() %>% 
+    filter(primer=="18S_V7") %>% 
+    select(lineage,sample_id, percent_reads) %>% 
+    spread(key=sample_id, value= percent_reads, fill = 0)
+  
+    d3<-t(dis_mat[,2:67])  ##  colnames(all3)     z<-all3[,135:151]
+    df3<-  vegan::specaccum(d3, method="random",permutations = 1000)
+    
+cc<-c("red","orange","green")
+ll<-c(2,1,2)
+plot(df1, col=cc[1] , ci.type="polygon", ci.col=adjustcolor(cc[1],alpha.f=0.3), ci.lty=0, lwd=3, lty=ll[1], xlim= c(0,75), ylab="Number of sequence variants", xlab="Number of samples")
+plot(add=TRUE , df2, col=cc[2] , ci.type="polygon", ci.col=adjustcolor(cc[2],alpha.f=0.3), ci.lty=0, lwd=3, lty=ll[1])
+plot(add=TRUE , df3, col=cc[3] , ci.type="polygon", ci.col=adjustcolor(cc[3],alpha.f=0.3), ci.lty=0, lwd=3, lty=ll[3]
+    , ylab="Number of sequence variants", xlab="Number of samples")
+
+tit<-c("Combined","18S_V9","18S_V7")
+legend(30,80, tit, col=cc, lty=ll, lwd=2,
+       bty='n', inset=.1, y.intersp=1.5, merge=T)
+
+```
+
+
+## richness gam
+```{r rich_gam}
+# get rich and env for each sample
+#    names(dat_all_filt_combine_prim)     names(dat_rich)
+dat_rich <- dat_all_filt_combine_prim %>% 
+    group_by(sample_id,) %>% 
+    summarise( rich=n(), shannon = sum(  (-1*(log( (percent_reads) ))) * (percent_reads) )  ) %>% 
+    # get sample data  names(sample_dat2)
+    left_join(sample_dat2) %>% 
+  select(sample_id:mixer, water_depth, "present_surface_ice_cover_mean_near", "present_surface_nitrate_mean_near", "present_surface_par_mean_near", "present_surface_primary_productivity_mean_near", "present_surface_primary_productivity_range_near", "present_surface_salinity_mean_near", "present_surface_temperature_range_near", "linear_change_near", had_mean_temp_near, msec_distmarket, land_distance_near,"present_benthic_mean_depth_temperature_mean_near", sample_locations_num_lat:sample_id_by_lat) %>% 
+    rename_all(~stringr::str_replace_all(.,"_near",""))  %>% 
+  janitor::clean_names() %>% 
+    # scale
+  mutate(water_depth_scaled=scale(water_depth), ice_cover_mean_scaled =scale(present_surface_ice_cover_mean) , nitrate_scaled=scale(present_surface_nitrate_mean),  par_scaled = scale(present_surface_par_mean), pp_mean_scaled= scale(present_surface_primary_productivity_mean), pp_range_scaled= scale(present_surface_primary_productivity_range), salinity_scaled=scale(present_surface_salinity_mean), SST_change_scaled=scale(linear_change), SST_mean_scaled=scale(had_mean_temp), bot_temp_mean_scaled = scale(present_benthic_mean_depth_temperature_mean), SST_range_scaled=scale(present_surface_temperature_range) , land_dist_scaled=scale(land_distance), distmarket_scaled=scale(msec_distmarket) )
+
+###scale scale=TRUE divides by the standard deviation default does both center and scale
+
+# basic plots
+hist(sample_dat2$had_mean_temp_near)
+
+
+pdf(paste0(dir,plot_file,"/arctic_scattermatrix_rich_env_variables.pdf" ), width = 20, height = 20 )
+
+car::scatterplotMatrix(~rich+ice_cover_mean_scaled + nitrate_scaled  + par_scaled + bot_temp_mean_scaled +SST_change_scaled + pp_mean_scaled+SST_mean_scaled+land_dist_scaled , data=dat_rich, main="Taxa richness")
+dev.off
+
+# run gam
+wig=1 # defualt is 1, reduce wiggly by using 2 - bigger penalty
+
+#   + s(nitrate_scaled,  m=wig) 
+
+mod<-gam(rich ~ area_cat_3 + s(land_dist_scaled,  m=wig) + s(pp_mean_scaled,  m=wig)+ s(SST_mean_scaled,  m=wig)  , method= "ML" , data=dat_rich, family= "poisson")
+mod1<-update(mod, family= "nb")
+## not much here, land_dist sig, next -- include water depth, sampler and method ???????????
+
+AIC(mod, mod1 ) # nb
+    
+  draw(mod1)
+appraise(mod)
+appraise(mod1)
+summary(mod1)
+par(mfrow = c(2,2))
+gam.check(mod1)
+
+## assess concurvity between each term and `rest of model'...
+concurvity(mod)  # cutoff of 0.8 ??
+
+
+#   Notes:  Temp high linerar relationship with ice cover
+ #             par not significant
+
+```
+
+
+## multivariate gam
+```{r multi_gam, eval=FALSE, include=FALSE}
+
+#library(mvabund)
+## for sample data use    names(dat_rich)
+var <- dat_rich
+
+# spread dat_rich    names(dat_all_filt_combine_prim)
+#   each sample is a row and each variable is a column
+cc <- dat_all_filt_combine_prim %>%  
+     ungroup() %>% 
+    select(sample_id, lineage, percent_reads) %>% 
+    spread(key=lineage, value= percent_reads, fill = 0) %>% 
+    select(-sample_id)
+
+mv <- mvabund::mvabund( log((cc*100)+1) )
+
+
+mod_all<- mvabund::manyany("gam", cc,  y~ area_cat_3 + s(land_dist_scaled,  m=wig) + s(pp_mean_scaled,  m=wig)+ s(SST_mean_scaled,  m=wig) , data=var, family="nb" ) 
+
+ ## nothing works with gam !!!!!!!!!!!!
+# even when limited to one variable - runs but no convergance
+
+  mes<-summary(mod_all)
+    plot(mod_all)
+      boxplot(cc, yaxis="Taxa")
+      mod_sum <- anova(mod_all)
+      mod_sum_full <- anova(mod_all, p.uni="adjusted")
+      mod_sum_resid<- anova(mod_all, resamp="residual")
+
+
+```
+
+## multivariate glm
+```{r multivariate_glm}
+
+# check VIF     names(dat_rich)
+    #  test covariation !!'
+HH::vif(xx = as.data.frame(dat_rich[ , c("water_depth_scaled", "par_scaled","pp_mean_scaled", "bot_temp_mean_scaled", "SST_change_scaled" )])) 
+      #   hist(sdat$msec_humanpop_50km)
+    ##  all < 2     "ice_cover_mean_scale", - 86 ; "nitrate_scaled"-29
+#  now VIF <4      ; ice cover and temp and temp range ; pp mean and nitrate and pp range related ; land_dist related with STT change and dist market
+
+var <- dat_rich
+# spread dat_rich    names(dat_all_filt_combine_prim)     names(var)
+#   each sample is a row and each variable is a column
+cc <- dat_all_filt_combine_prim %>%  
+     ungroup() %>% 
+    select(sample_id, lineage, percent_reads) %>% 
+    spread(key=lineage, value= percent_reads, fill = 0) %>% 
+    select(-sample_id)
+
+mv <- mvabund::mvabund( log((cc)+1) )
+
+#mod<- mvabund::manyglm(mv ~ (water_depth_scaled + land_dist_scaled + par_scaled + pp_mean_scaled + SST_mean_scaled), data=var, family="negative.binomial", composition= "TRUE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # "shrink" better
+
+
+mod<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled), data=var, family="negative.binomial", composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+    # plot(mod)
+    #  boxplot(cc, yaxis="Taxa")
+     # mod_sum <- anova(mod)
+     # mod_sum_full <- anova(mod, p.uni="adjusted")
+     # mod_sum_resid<- anova(mod, resamp="residual")
+
+
+mod_anov<-anova(mod, resamp="pit.trap",nBoot=1000,cor.type="shrink",p.uni="adjusted")##
+#   binomial("cloglog")
+
+
+mod_sum<-summary(mod, resamp="pit.trap",nboot=1000,cor.type="shrink",show.cor=TRUE, nCore=3)
+
+# family=binomial("cloglog") # best for binomial
+
+
+```
+
+
+
+
+## multivar_plot_OLD-base
+set not to run!!!!!!
+```{r eval=FALSE, include=FALSE}
+
+## rename
+t<-mod
+t.an<-mod_anov  # anova results
+t.s<-mod_sum   ##  summary results length(row.names(t.an))
+taxa_file<-dat_all_filt_combine_prim
+
+#   diverge.color <- function(data,pal_choice="RdGy",centeredOn=0){
+
+## set up colors
+col_sig<-c(alpha("green",0.4),"grey80") # background to show significance - alpha doesn't work with eps
+# col_sig<-c("Inchworm","grey90") # first significant color then not sig
+ccll<-c("darkred","darkgreen","black")  ## be as many as cluster number   -colors from bottom up!!  # clusters of taxa
+
+nlevels<-50
+my_palette_p <- colorRampPalette(c("blue","white","red"))(nlevels)  # palette for correlations
+#
+num_clust<-8 # number of clusters for taxa
+# base on t.cn
+x_labels<-c("Water depth", "Distance to land" , "SST", "Primary Prod.", "PAR")
+# set p value minimum fo individual taxa to include in plot
+p_min_val<- 0.15
+# 
+inner_margins<-c(.3,27,1,1)  # increase left - second number for larger taxa names - oppossite too
+#   # bottom, left, top, and right
+
+
+## test to see what species to include#######  ~30 taxa
+t.p<-t(t.an$uni.p)  
+zzz<-c(2:length(colnames(t.p)))
+mess<-rowSums(t.p[,zzz]<= p_min_val ,na.rm = TRUE)
+mess1<-mess[mess>0]
+mel<-names(mess1)
+#### 
+#t.stat<-t.s$statistic ###overall
+t.coef<-coef(t)  # hist(t.coef)
+t.ts<-t(t.an$uni.test)  ### t is to transpose-dumbass
+t.p<-t(t.an$uni.p)   ###  length(row.names(t.p))
+#t.cov<-t.s$cov.unscaled
+t.res<-residuals(t)
+t.fitval<-t$fitted.value
+t.df<-t$df.residual
+### remove species not selected in mel
+t.coef<-t.coef[,which(colnames(t.coef) %in% mel)]
+t.ts<-t.ts[which(row.names(t.ts) %in% mel),]  ### t is to transpose-dumbass
+t.p<-t.p[which(row.names(t.p) %in% mel),]   ###  length(row.names(t.p))
+
+
+###################################################################################
+####   cluster species by test statistic and get order
+#   for long-term trap   #####################################
+#  colnames(t.ts)
+zzz<-c(2:length (colnames(t.ts)))  ## to remove intercept
+
+# prepare hierarchical cluster  !!!!!!!!!!!!
+#clus<-t.ts   # choose this for test statistic - used this for NOAA paper
+clus<-t(t.coef)  # choose this for correlation - I think this makes more sense
+
+
+clus<-clus[,zzz]
+t.rn<-as.character(row.names(clus))
+#hc<-hclust(dist(clus))
+hc<-hclust(sqrt(dist(clus)))  ##cluster based on stat value of factors
+# very simple dendrogram    
+plot(hc)
+clgr<-rect.hclust(hc, k = num_clust) ## draw rectanges -## cut tree can use k-#clusters or h= height of tree, 
+clgr1<-data.frame(matrix(unlist(clgr), nrow=length(t.rn), byrow=T)) ## number species to keep cluster order
+names(clgr1)[1]<-paste("name")
+clgroup<-data.frame(cutree(hc, k = num_clust))  ## cut tree can use k-#clusters or h= height of tree, 
+names(clgroup)[1]<-paste("group")
+clgroup$name<-c(1:length(t.rn))
+clgroup$taxa<-row.names(clgroup)
+## list species by clustering with cluster number based on hhh
+clustorder<-left_join(clgr1,clgroup, by="name")  ## class(clgroup$alph_order) colnames(clgroup)
+
+ccc<-data.frame(rep(ccll,length.out=length(unique(clustorder$group))),stringsAsFactors = F) ##
+ccc$group<-clustorder$group[!duplicated(clustorder$group)]
+clustorder<-left_join(clustorder,ccc, by="group")  
+names(clustorder)[4]<-paste("color")
+t.clustorder<-clustorder  ### cluster order with added colors
+
+#####################################################################################
+######   prep data  ###########################################################
+##    for trap   ###
+########################################
+## creat matrix for squares   ##p-value
+zz<-t.p
+zz<-zz[match(t.clustorder$taxa, row.names(zz)),]
+##zzz<-c(2:10)
+cc2<-data.matrix(zz[,zzz])   #   dd<-describe(cc)
+t.cn<-colnames(cc2)
+#cc<-log(cc+1) # transform    describe(cc)
+tcc<-t(cc2[nrow(cc2):1,])  # to make image plot correct need to turn matrix
+t.sqr<-tcc
+
+######################################################################
+## create list for points
+# first color (correlation) than size (test stat.)
+
+#  color of circles  ############  coefficent, correlation between factor and species
+### trap
+cc<-t(t.coef)
+cc<-cc[match(t.clustorder$taxa, row.names(cc)),]
+#   colnames(cc)
+cc<-cc[,zzz]  ## hist(cc)
+cc<-scale(cc)  ## to scale by variable
+#cc<-sqrt(cc)
+cc<-(cc[nrow(cc):1,])## reverse rows with matrix
+mcc<-reshape::melt(cc)  #  hist(mcc$value)
+mcc$y=rep(1:nrow(cc), len=nrow(mcc))
+mcc$x=rep(1:ncol(cc), each=nrow(cc))
+zlim=c(min(mcc$value,na.rm=T),max(mcc$value,na.rm=T))
+## determine max values for coefficiant colors - most only in middle, better to show difference of many than outliers- better than transfor?
+  # hist(mcc$value)
+zmax<- 1  # set limits - need to be equal from 0 for 0 to be white
+zmin<- -1
+# make face values to add colors
+mcc$value_for_col<-mcc$value
+mcc$value_for_col[mcc$value_for_col > zmax ]<- zmax
+mcc$value_for_col[mcc$value_for_col < zmin ]<- zmin
+mcc$col <- my_palette_p[cut(mcc$value_for_col,nlevels)] 
+t.mcc<-mcc
+
+##########
+#  size of circles   ############    Test statistic
+##trap
+cs<-t.ts
+cs<-cs[match(t.clustorder$taxa, row.names(cs)),]
+cs<-cs[,zzz]  ## hist(cs)
+#cs<-cs[,match(t.cn, colnames(cs))]      ## match variables to trap order
+cs<-scale(cs)
+t.cc<-cs
+cs<-(cs[nrow(cs):1,])## reverse rows with matrix
+lcc<-reshape::melt(cs)
+lcc$y=rep(1:nrow(cs),len=nrow(lcc))
+lcc$x=rep(1:ncol(cs),each=nrow(cs))
+zlim=c(min(lcc$value,na.rm=T),max(lcc$value,na.rm=T))
+levels <- seq(zlim[1],zlim[2],length.out = nlevels)
+csize <- seq(from=0.2, to=3, length.out=nlevels) 
+lcc$size <- csize[cut(lcc$value,nlevels)] 
+t.sc<-lcc
+
+#ticks<-c(0,10,100,1000,10000,100000)
+xx = c(1:length(rownames(t.sqr)))# extract latitudes
+yy = c(1:length(colnames(t.sqr))) # extract longitudes
+cn<-as.character(row.names(t.sqr)) # x axis labels - not used
+rn <-as.character(colnames(t.sqr)) # taxa names for y axis
+rn<-data.frame(rn)
+colnames(rn) <-"lineage_stat"
+
+##################################################
+## custamize y-axis names
+# rn[rn=="Epinephelus.niveatus"]<-"Hyporthodus.niveatus" # if need to change name of taxa
+######## match labels from stat to other
+ylabels<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
+  ungroup() %>% 
+  select(lineage:Species) %>% 
+  distinct(lineage, .keep_all=TRUE) %>% 
+  mutate(lineage_stat= gsub(";", ".", lineage)) %>% 
+  mutate(lineage_stat= gsub(" ", ".", lineage_stat)) %>% 
+  mutate(lineage_stat= gsub("-", ".", lineage_stat)) %>% 
+  inner_join(rn) %>% 
+  unite(y_labels, Phylum:Genus , sep=";") %>% 
+  mutate(y_labels=gsub("NA", "Unclassified", y_labels)) %>% 
+  pull(y_labels)
+## !!!!!   make sure length(rn)== length(ylabels$lineage_stat)   #   !!!!!!
+# mes<- rn %>% 
+#   anti_join(ylabels)
+  
+  #   old fixes - delete
+#rn <- gsub("\\.", ";", rn) # change "." to something
+#rn <-gsub("^[^;]*;", "", rn) # remove all before first ; - remove kingdom
+#rn <-gsub("(.*)sp.*","\\1",rn) # incase has sp need to remov after
+
+
+##################################################
+##################################################
+##################################################
+## image.plot        use image if no legend (or if have mulipte plots), but use image.plot if want legend
+#  *******base on t.cn*******
+#########################################
+####################################################################
+
+pdf(paste0(dir,plot_file,"/manyglm_plot_abund.pdf" ), width = 8, height = 10 )
+
+################
+
+par(mfrow=c(1,1),mar=inner_margins ,oma=c(5,0,1,2)) 
+# bottom, left, top, and right
+   ######################
+
+image(xx,yy,t.sqr, axes=F ,col=col_sig , breaks=c(min(t.sqr),0.05,max(t.sqr)), xlab ="", ylab ="")
+#   plot(as.dendrogram(hc),horiz=T)
+### y labels
+axis(side=2, at= 1:length(rn), labels=FALSE, las=2, cex.axis=0.8)
+mtext(ylabels, side=2,line=1,at=c(1:length(ylabels)),las=2, adj=1,cex=.8, col=(t.clustorder$color))  ### rev(t.clustorder$color)
+box()
+## x labels    ########
+tt<-c("black")
+axis(side=1, at=1:length(cn), labels=F, las=2, cex.axis = 0.8)
+par(xpd=NA)
+text(c(1:length(cn)),-0.1,labels=x_labels,srt=45,cex=0.8,font=1,adj=1)
+#par(xpd=TRUE)
+#text(c(1:length(cn)),-1,labels=x_labels,srt=45,cex=0.8,font=1,adj=1)
+########     plot circles col- cc and size- cs  ##########################  
+points(t.mcc$x,t.mcc$y,  col=t.mcc$col,  bg=t.mcc$col, pch=21, cex=t.sc$size)  
+###
+
+dev.off()
+
+
+
+
+
+#####################################################################################################
+##################################################################################################################
+###### examples- delete    legends     ################
+#text(11.3,17,labels="Num of reads",srt=45,cex=0.8,font=1)
+#text(12,16.5,labels="St. dev.",srt=45,cex=0.8,font=1)
+###square legend
+#image.plot(zlim =range(t.mcc$value, na.rm=TRUE),  nlevel = nlevels,legend.only = TRUE, 
+ #          horizontal=FALSE, col=rev(my_palette),  axis.args=list( at=log(ticks+1),labels=ticks, cex.axis=.8),
+ #        smallplot= c(.81,.83,.35,.85), graphics.reset=T) 
+## point legend     hist(t.mcc$value)
+#image.plot(zlim = c(-1.5,1.5), nlevel = nlevels ,legend.only = TRUE,
+   #       horizontal=FALSE, col=my_palette_p ,axis.args=list(at=ticks, labels=F, cex.axis=.8),
+  #        legend.args = list(cex = .8, side = 4, line=0, title="Num of reads"), smallplot= c(.775,.795,.35,.85), graphics.reset=T)
+
+
+
+
+
+
+
+```
+
+
+## mutivar_plot-ggplot
+```{r mutivar_plot-ggplot}
+
+## rename
+t<-mod
+t.an<-mod_anov  # anova results  rownames(t.an)
+t.s<-mod_sum   ##  summary results length(row.names(t.an))
+taxa_file<-dat_all_filt_combine_prim
+
+#  diverge.color <- function(data,pal_choice="RdGy",centeredOn=0){
+
+## set up colors
+#col_sig<-c("grey80", alpha("green",0.4)) # background to show significance - alpha doesn't work with eps
+col_sig<-c("grey85", "grey40") #
+# col_sig<-c("Inchworm","grey90") # first significant color then not sig
+ccll<-c("darkred","darkgreen","black")  ## be as many as cluster number   -colors from bottom up!!  # clusters of taxa
+ccll<-col_y_lab # wee anderson defined in universal variables
+nlevels<-50
+my_palette_p <- colorRampPalette(c("blue","white","red"))(nlevels)  # palette for correlations
+#
+num_clust<-8 # number of clusters for taxa
+# base on t.cn
+x_labels<-c( "Bottom temp.", "PAR", "Primary Prod.","SST change" ,"Water depth") # should be alphabetical, check match order of mult_dat3
+# set p value minimum fo individual taxa to include in plot
+p_min_val<- 0.2
+# 
+inner_margins<-c(.3,27,1,1)  # increase left - second number for larger taxa names - oppossite too
+#   # bottom, left, top, and right
+
+
+###### prep data
+#t.stat<-t.s$statistic ###overall
+t.coef<-coef(t)  # hist(t.coef)
+t.ts<-t(t.an$uni.test)  ### t is to transpose-dumbass
+t.p<-t(t.an$uni.p)   ###  length(row.names(t.p))
+# not used but if want   #t.cov<-t.s$cov.unscaled
+t.res<-residuals(t)
+t.fitval<-t$fitted.value
+t.df<-t$df.residual
+# test stat
+mult_dat <- data.frame(t.ts) %>%   # names(mult_dat)
+  rownames_to_column(var = "lineage") %>% 
+  select(- X.Intercept.) %>% 
+  gather(key="variable" , value="test_stat", -lineage)
+# p-value
+mult_dat_p <- data.frame(t.p) %>%   # names(mult_dat)
+  rownames_to_column(var = "lineage") %>% 
+  select(- X.Intercept.) %>% 
+  gather(key="variable" , value="p.value", -lineage)
+# coef
+mult_dat_c <- data.frame(t(t.coef)) %>%   # names(mult_dat)
+  rownames_to_column(var = "lineage") %>% 
+  select(- X.Intercept.) %>% 
+  gather(key="variable" , value="coef", -lineage)
+# put together
+mult_dat2 <- mult_dat %>% 
+  left_join(mult_dat_p) %>% 
+  left_join(mult_dat_c) %>% 
+  ## test to see what species to include by p-value #######  ~30 taxa
+  group_by(lineage) %>% 
+  filter( any(p.value <= p_min_val )  ) %>% 
+  ungroup() %>% 
+  mutate(p_val_col=if_else( p.value <= 0.05, "significant" , "not significant" )  )# color for p-value
+
+
+
+###################################################################################
+####   cluster species by test statistic and get order
+#  colnames(t.ts)
+# prepare hierarchical cluster  !!!!!!!!!!!!
+#clus<-t.ts   # choose this for test statistic - used this for NOAA paper
+clus<-t(t.coef)  # choose this for correlation - I think this makes more sense
+zzz<-c(2:length (colnames(t.ts)))  ## to remove intercept
+clus<-clus[,zzz]
+clus<-clus[match(unique(mult_dat2$lineage), row.names(clus)),] # limit to above p-value cutoff  !!!!!
+t.rn<-as.character(row.names(clus))
+#hc<-hclust(dist(clus))
+hc<-hclust(sqrt(dist(clus)))  ##cluster based on stat value of factors
+# very simple dendrogram    
+  plot(hc)
+clgr<-rect.hclust(hc, k = num_clust) ## draw rectanges -## cut tree can use k-#clusters or h= height of tree, 
+clgr1<-data.frame(matrix(unlist(clgr), nrow=length(t.rn), byrow=T)) ## number species to keep cluster order
+names(clgr1)[1]<-paste("name")
+clgroup<-data.frame(cutree(hc, k = num_clust))  ## cut tree can use k-#clusters or h= height of tree, 
+names(clgroup)[1]<-paste("group")
+clgroup$name<-c(1:length(t.rn))
+
+## list species by clustering with cluster number based on hhh
+clustorder<-left_join(clgr1,clgroup, by="name")  ## class(clgroup$alph_order) colnames(clgroup)
+ccc<-data.frame(rep(ccll,length.out=length(unique(clustorder$group))),stringsAsFactors = F) ##
+ccc$group<-clustorder$group[!duplicated(clustorder$group)]
+clustorder<-left_join(clustorder,ccc, by="group")  
+names(clustorder)[3]<-paste("color")
+names(clustorder)[1]<-paste("taxa_num")
+clustorder$taxa_cluster_arrange<-row.names(clustorder)
+## add names back in
+clust_nam<-data.frame(t.rn) %>% 
+  rename(lineage = "t.rn") %>% 
+  rowid_to_column("taxa_num")
+
+clustorder <- clustorder %>% 
+  left_join(clust_nam)
+
+
+#####################################################################################
+######   prep data  ###########################################################
+########################################    -- remove today  !!!!!if don't need for ggplot
+  # creat x and y , and order by cluster
+
+mult_dat3 <- data.frame(mult_dat2) %>%    # names(mult_dat2)
+  left_join(clustorder) %>% 
+  mutate(taxa_cluster_arrange=as.numeric(taxa_cluster_arrange)) %>% 
+  arrange(taxa_cluster_arrange, variable) %>% 
+  mutate(xx = rep(1:length(x_labels), len=nrow(mult_dat2) ) , yy =rep(1:nrow(clustorder), each=length(x_labels))    ) %>% 
+  mutate(coef_log=if_else( coef>=0, log(coef+1), (log(abs(coef)+1) )*-1    )   )
+  
+##################################################
+##          custamize y-axis names
+######## match labels from stat to other
+rn <-as.character(rownames(t.p)) # taxa names for y axis
+rn<-data.frame(rn)
+colnames(rn) <-"lineage_stat"
+
+y_labels_make<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
+  ungroup() %>% 
+  select(lineage:Species) %>% 
+  distinct(lineage, .keep_all=TRUE) %>% 
+  mutate(lineage_stat= gsub(";", ".", lineage)) %>% 
+  mutate(lineage_stat= gsub(" ", ".", lineage_stat)) %>% 
+  mutate(lineage_stat= gsub("-", ".", lineage_stat)) %>% 
+  inner_join(rn) %>% 
+  unite(y_labels, Phylum:Genus , sep=";", remove=FALSE) %>% 
+  mutate(y_labels=gsub("NA", "Unclassified", y_labels))
+ 
+y_labels <- clustorder %>% 
+    rename(lineage_stat=lineage) %>% 
+    left_join(y_labels_make)
+
+## !!!!!   make sure length(rn)== length(ylabels$lineage_stat)   #   !!!!!!
+# mes<- rn %>% 
+#   anti_join(ylabels)
+
+## get breaks for coefs.
+#   hist(mult_dat3$coef)
+#   hist(mult_dat3$coef_log)
+
+##################################################
+##################################################
+mid_coef<-0 # set middle value of scale fo coef
+upper_coef<- 0.9
+lower_coef<- upper_coef*-1
+dd<-2  # number for middle break and labels
+
+
+  ####
+mult_plot <- ggplot(mult_dat3, aes(xx, yy) ) +
+    geom_tile(aes(fill = p_val_col), colour = "grey50") +
+    scale_fill_manual( values=col_sig )  +
+  geom_point(aes(color=coef_log  , size=test_stat)) +
+  scale_color_gradientn(name="Coeficient", colors= pal3 , space="Lab", # , mid="white"
+                        values = scales::rescale( c(  (lower_coef+(0.1*lower_coef)), lower_coef/9, 0, upper_coef/9, (upper_coef+(0.1*upper_coef))    )  ) ,   # shrink white 
+                        limits= c(lower_coef+(0.1*lower_coef), upper_coef+(0.1*upper_coef)  ) ,
+                    breaks=c(lower_coef,lower_coef/dd, mid_coef,upper_coef/dd, upper_coef), 
+                    labels= round( c(   ((exp(abs(lower_coef))-1)*-1),  ((exp(abs(lower_coef/dd))-1)*-1), mid_coef, (exp(upper_coef/dd)-1) , (exp(upper_coef)-1)   ),1 ) , 
+                     oob = scales::squish ) + ##   oob colors outside of limits
+      scale_x_continuous(name=NULL, breaks=c(1:length(x_labels) ), labels=x_labels) +
+     scale_y_continuous(name=NULL,breaks=c(1:length(y_labels$y_labels)) , labels=y_labels$y_labels ) +
+  guides(fill = FALSE, size=guide_legend(title="Test stat")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1.5), axis.text.y = element_text(color=y_labels$color),  axis.ticks = element_blank() )
+
+
+ggsave(mult_plot, file=paste(dir,plot_file,"/multvar_taxa_abund.tiff",sep=""), width = 20, height = 25, units = "cm", dpi="print")
+
+
+
+```
+
+
+
+## MDS_GAM
+see good tutorial:
+https://peat-clark.github.io/BIO381/veganTutorial.html
+
+```{r lat_MDS}
+##  using vegan
+
+# create community matrix, same as above for mutlivariate
+cc <- dat_all_filt_combine_prim %>%  
+     ungroup() %>% 
+    select(sample_id, lineage, percent_reads) %>% 
+    spread(key=lineage, value= percent_reads, fill = 0) %>% 
+    select(-sample_id)
+var <- dat_rich  # names(var)    env. variables used above too ; from richness gam chunk
+
+### make nice labels - GENUS
+cc_name<- data.frame(names(cc)) %>% 
+    rename(lineage = names.cc.) 
+
+y_labels_mds<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
+  ungroup() %>% 
+  select(lineage:Species) %>% 
+  distinct(lineage, .keep_all=TRUE) %>% 
+  mutate(lineage_stat= gsub(";", ".", lineage)) %>% 
+  mutate(lineage_stat= gsub(" ", ".", lineage_stat)) %>% 
+  mutate(lineage_stat= gsub("-", ".", lineage_stat)) %>% 
+  inner_join(cc_name) %>% 
+  unite(y_labels, Phylum:Genus , sep=";", remove=FALSE) %>% 
+  mutate(y_labels=gsub("NA", "Unclassified", y_labels)) %>% 
+  #mutate(family_labels=gsub("NA", "Unclassified", Family)) %>% 
+# order by cc
+  mutate(lineage=factor(lineage, levels = cc_name$lineage) ) %>% 
+  arrange(lineage) %>% 
+## add abundance for priorotizing labeling of MDS
+  mutate(priority_abund = colSums(cc) ) %>% 
+   # reduce proitirty if family = NA
+  mutate(priority_abund= if_else(Family=="NA" , 0 , priority_abund)) %>% 
+  mutate(Family_label= if_else(Family=="NA" , "" , Family))
+ 
+
+
+# example_NMDS <- metaMDS( cc,    k=5 ) # 
+
+example_NMDS <- metaMDS( log(cc+1),    k=5 , trymax=40) # Our community-by-species matrix
+                   # The number of reduced dimensions. Increase if high stress is problem. 
+#"The stress, or the disagreement between 2-D configuration and predicted values from the regression"
+#A good rule of thumb: stress > 0.05 provides an excellent representation in reduced dimensions, > 0.1 is great, >0.2 is good/ok, and stress > 0.3 provides a poor representation
+# here - 0.09 - great representation
+
+x_let<- -2.05
+y_let<- 1.5
+cex_let <- 1.2
+cex_size<-0.85
+### 6 plots ?
+# plot(example_NMDS)
+
+pdf(paste0(dir,plot_file,"/arctic_surf_mds_GAMs.pdf" ), width = 10, height = 15 )
+
+################
+
+par(mfrow=c(4,2),mar=c(1.5,1.5,1.5,1.5) ,oma=c(3,3,2,2)) 
+
+# sites by numbers
+pl<- ordiplot(example_NMDS,type="n", xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+#points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+orditorp(example_NMDS, display="sites",cex=0.95, air=0.01, labels= as.character(var$sample_id_by_lat) ,col=col_y_lab[2]  ) # label sites  # air close to 1 - no overlap, 0 - full overlap
+# , labels= var$sample_id_by_lat
+text(x=x_let, y=y_let, labels="a",cex=cex_let)
+
+# label species
+ordiplot(example_NMDS,type="n", xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+orditorp(example_NMDS,display="species",col="grey30",air=0.9, priority= y_labels_mds$priority_abund, labels=y_labels_mds$Family_label, 
+   cex=0.95, pcex= 0)
+text(x=x_let, y=y_let, labels="b",cex=cex_let)
+
+####
+# Use the function ordisurf to plot contour lines
+# LAT
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$lat, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="c",cex=cex_let)
+
+# Sea ICS
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$present_surface_ice_cover_mean, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="d",cex=cex_let)
+
+# temo
+# names(var)pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$present_benthic_mean_depth_temperature_mean ,  main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="e",cex=cex_let)
+
+# sst change
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$linear_change, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="f",cex=cex_let) # var$land_distance
+
+# pp
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$present_surface_primary_productivity_mean, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="g",cex=cex_let)
+
+# depth
+pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
+ordisurf(example_NMDS,var$water_depth, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
+text(x=x_let, y=y_let, labels="h",cex=cex_let)
+
+
+
+mtext("NMDS1", side=1, line=1.1, at=0.47,las=1, adj= 0,cex=1, col="black",  outer = TRUE)  
+mtext("NMDS2", side=2,line= 0.7, at=0.47, las=0, adj=0,cex=1, col="black",  outer = TRUE)  
+
+
+dev.off()
+
+
+
+#####################################3
+#   get gam summary for ordisurf
+# get p-value of ordisurf
+
+x<-ordisurf(example_NMDS,var$lat,main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+x<-ordisurf(example_NMDS,var$present_surface_ice_cover_mean, main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+x<-ordisurf(example_NMDS,var$present_benthic_mean_depth_temperature_mean,main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+x<-ordisurf(example_NMDS,var$linear_change, main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+x<-ordisurf(example_NMDS,var$present_surface_primary_productivity_mean, main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+x<-ordisurf(example_NMDS,var$water_depth, main="",col="black", cex=1, labcex = cex_size)
+summary(x)
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
