@@ -19,7 +19,7 @@ library(fields)
 library(psych)
 library(tidyverse) 
 library(broom)
-library("sf")
+library("sf")  # install.packages("classInt")
 #library("rgeos")
 library("rnaturalearth")
 library("rnaturalearthdata")
@@ -27,7 +27,7 @@ library("grid")
 library("ggplot2") # install.packages("ggplot2")
 
 library("maps")
-library("sf")
+
 
 library("mapproj")
 
@@ -38,6 +38,8 @@ select<-dplyr::select
 library(mgcv)
 library(tidymv)  # for plotting - plot_smooths()
 library(gratia) 
+
+# update.packages(c("sf"))
 ```
 
 ## functions
@@ -109,9 +111,6 @@ il <-rnaturalearth::ne_countries(scale='large', country = 'Iceland', returnclass
 nor <-rnaturalearth::ne_countries(scale='large', country = 'Norway', returnclass = 'sf')
 
 
-
-
-
 ```
 
 
@@ -127,13 +126,15 @@ plot_file<-"Documents/KAUST/eDNA/R/plots/Arctic_surface_june2022"
 
 # name for csv that you saved from post DADA2 filter
 export_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")
+#  name of data
+dat_name<-paste(stud_pat,"_filtered_data_all2.csv",sep="")  
+
 
 ## location of geo layers
 geo_file <- paste0(dir,"Global_databases")
 rast_path_bio <- paste0(geo_file,"/Bio-oracle/Surface_present")
 
-#  name of data
-dat_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")  
+
 
 
 ## set some other universal variables
@@ -153,6 +154,8 @@ sam_file_path<-paste0(dir,"Documents/KAUST/eDNA/Samples_Data/Arctic surface/Arct
 
 # lineage names  !!!  used later check
 tl<-c("Superkingdom","Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+tl_cluster<-c("Superkingdom","Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species","cluster_num")
 
 # get colors for 5 cores
 # brown to green - 
@@ -358,6 +361,9 @@ samples_both_prim <- dat_all_filt %>%
 # tidy above to make one df of all taxa present for both primers
 #    match by site/sample then get mean percent reads !!
 dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(dat_all_filt$primer) 
+  # remove cluster number from lineage. remove after last ';'
+  # example -outcome <- sub("_[^_]+$", "", exampleList)
+  mutate(lineage=sub( ";[^;]+$","",lineage) )  %>% # remove after last ; - cluster#
   #  select
   group_by(lineage, sample_id, type, date, lat, lon, depth) %>% # add year
   summarize(percent_reads=sum(percent_reads/2), count_of_primers=n()  ) %>%  #  unique(dat_all_filt_combine_prim$count_of_primers) 
@@ -366,6 +372,9 @@ dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(d
  # mutate(percent_reads=ifelse(count_of_primers==1, percent_reads/2, percent_reads)) %>%   # make true percent, divide rest of percents by 2
   arrange(sample_id) %>% 
   tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE) %>% 
+
+   mutate(Species=gsub('^\\.+|\\.+$', '', Species)) %>%  # remove leading or trailing "."
+  
   # remove samples that don't have both primers
   inner_join(select(samples_both_prim, sample_id)) 
 
@@ -373,7 +382,62 @@ dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(d
 
 ```
 
+## get marine yes/no
+use worms package to get accepted names
+use warms package to get information including - Kingdom through species
+```{r worms_info}
+##   check and change names in worms     ##################################
+#   library(worrms)
+## originally from red sea surface analysis
 
+#####   begin loop to get basic worrms info -- 
+# set pattern
+taxa2 <- dat_all_filt_combine_prim %>%
+  filter( Species != 'NA' ) %>% 
+  filter (!grepl("sp",Species)) %>%  # remove any species with sp
+  select(Species) %>% 
+  distinct(Species) %>% 
+  rename(Species_clean=Species)
+
+xx<-taxa2$Species_clean # set species name column
+z<-50  ## batch size
+stt<-seq(1,length(xx),by=z)  # head(stt)   
+
+for (i in stt) {
+  
+  if (i== last(stt)){
+    j<-length(xx) } else{j<-i+(z-1)}
+
+g<- xx[i:j]
+gg <- worrms::wm_records_names(name = g, fuzzy = F, marine_only = F) # get worrms info
+ggg<-bind_rows(gg) 
+
+if (i==1){
+  worm_info<-ggg}
+else{
+  worm_info<-rbind(worm_info,ggg)}
+print(j)  # print(Sys.time()) 
+}
+
+## tidy
+#   names(worm_info)
+worm_info2 <- worm_info %>% 
+  select(scientificname,  kingdom, phylum, class, order, family, genus, isMarine, isBrackish) %>% 
+  rename(Species = scientificname ) %>% 
+  filter(isMarine==1 | isBrackish==1)
+
+worm_not_marine <- worm_info %>% 
+  select(scientificname,  kingdom, phylum, class, order, family, genus, isMarine, isBrackish, isFreshwater, isTerrestrial) %>% 
+  rename(Species = scientificname ) %>% 
+  anti_join(worm_info2) %>% 
+  filter(genus != 'Navicula' & genus != 'Thalassiosira') # no info in worms, but further search found they are marine diatoms.
+
+  #filter(isFreshwater==1 | isTerrestrial==1)
+# 2 land plants, ice algae, insect, 3 freshwater diatoms, human
+#. 102 species   83 or 93 marine or brackish based on worrms
+#   two more diatoms marine so 85 of 93 -  <10%
+
+```
 
 ## euk by phylum
 
@@ -382,7 +446,8 @@ dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(d
 #  pool to phylum  !!!!!   get only needed data - keys, phylums, reads
 euk_phylum<- dat_all_filt %>%  #  names(dat_all_filt)
   # break out lineage
-  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  tidyr::separate(lineage, into=tl_cluster, sep=";" , remove=FALSE)   %>% 
+  
   #
   select(primer, primer_taxassign_id, sample_id,  sample_id_u, lat,lon,depth ,Phylum, reads, rare_reads, percent_reads ) %>% 
   #  pool reads at phylum
@@ -455,7 +520,7 @@ euk_phylum_top_combine_prim <- euk_phylum_combine_prim %>%
 #  pool to order  !!!!!   get only needed data - keys, phylums, reads
 euk_order<- dat_all_filt %>%  #  names(dat_all_filt)
   # break out lineage
-  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  tidyr::separate(lineage, into=tl_cluster, sep=";" , remove=FALSE)   %>% 
   #
   select(primer, primer_taxassign_id, sample_id,  sample_id_u,lat,lon,depth ,Phylum:Order, reads, rare_reads, percent_reads ) %>% 
   #  pool reads at genus
@@ -533,7 +598,7 @@ euk_order_top_combine_prim <- euk_order_combine_prim %>%
 #  pool to phylum  !!!!!   get only needed data - keys, phylums, reads
 euk_genus<- dat_all_filt %>%  #  names(dat_all_filt)
   # break out lineage
-  tidyr::separate(lineage, into=tl, sep=";" , remove=FALSE)   %>% 
+  tidyr::separate(lineage, into=tl_cluster, sep=";" , remove=FALSE)   %>% 
   #
   select(primer, primer_taxassign_id, sample_id,  sample_id_u,lat,lon,depth ,Phylum:Genus, reads, rare_reads, percent_reads ) %>% 
   #  pool reads at genus
@@ -1630,9 +1695,10 @@ cc <- dat_all_filt_combine_prim %>%
     select(-sample_id)
 
 mv <- mvabund::mvabund( log((cc*100)+1) )
+mv[mv>0] = 1 ##. make to presence absence!!!!
 
 
-mod_all<- mvabund::manyany("gam", cc,  y~ area_cat_3 + s(land_dist_scaled,  m=wig) + s(pp_mean_scaled,  m=wig)+ s(SST_mean_scaled,  m=wig) , data=var, family="nb" ) 
+mod_all<- mvabund::manyany("gam", mv,  y~ area_cat_3 + s(land_dist_scaled,  m=wig) + s(pp_mean_scaled,  m=wig)+ s(SST_mean_scaled,  m=wig) , data=var, family=binomial("cloglog") ) 
 
  ## nothing works with gam !!!!!!!!!!!!
 # even when limited to one variable - runs but no convergance
@@ -1667,11 +1733,13 @@ cc <- dat_all_filt_combine_prim %>%
     select(-sample_id)
 
 mv <- mvabund::mvabund( log((cc)+1) )
+mv[mv>0] <- 1 ##. make to presence absence!!!!
+
 
 #mod<- mvabund::manyglm(mv ~ (water_depth_scaled + land_dist_scaled + par_scaled + pp_mean_scaled + SST_mean_scaled), data=var, family="negative.binomial", composition= "TRUE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # "shrink" better
 
 
-mod<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled), data=var, family="negative.binomial", composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+mod<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled), data=var, family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
     # plot(mod)
     #  boxplot(cc, yaxis="Taxa")
      # mod_sum <- anova(mod)
@@ -1679,17 +1747,77 @@ mod<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_s
      # mod_sum_resid<- anova(mod, resamp="residual")
 
 
-mod_anov<-anova(mod, resamp="pit.trap",nBoot=1000,cor.type="shrink",p.uni="adjusted")##
+mod_anov<-anova(mod, resamp="pit.trap", test='score', nBoot=1000,cor.type="shrink",p.uni="adjusted")##
 #   binomial("cloglog")
 
 
-mod_sum<-summary(mod, resamp="pit.trap",nboot=1000,cor.type="shrink",show.cor=TRUE, nCore=3)
+mod_sum<-summary(mod, resamp="pit.trap", test='score', nboot=1000,cor.type="shrink",family=binomial("cloglog"),show.cor=TRUE, nCore=4)
 
 # family=binomial("cloglog") # best for binomial
 
 
+
+
 ```
 
+
+
+## multivar glm marine
+####### need run chunk above
+```{r multiv_glm_eDNAcon}
+
+cc_mar <- dat_all_filt_combine_prim %>% 
+  # remove non marine - from - worm info chunk
+     anti_join(worm_not_marine)   %>% 
+     ungroup() %>% 
+    select(sample_id, lineage, percent_reads) %>% 
+    spread(key=lineage, value= percent_reads, fill = 0) %>% 
+    select(-sample_id)
+
+mv4 <- mvabund::mvabund( log((cc_mar)+1) )
+mv4[mv4>0] <- 1 ##. make to presence absence!!!!
+
+
+mod_mar<- mvabund::manyglm(mv4 ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled ), data=var, family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov_mar<-anova(mod_mar, resamp="pit.trap", nBoot=1000, cor.type="shrink",p.uni="adjusted", test='score')##
+
+```
+
+
+
+## multivar glm edna cons
+####### need run chunk -multivariate glm - 2 above
+```{r multiv_glm_eDNAcon}
+
+mod<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled ), data=var, family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov<-anova(mod, resamp="pit.trap", nBoot=1000, cor.type="shrink",p.uni="adjusted", test='score')##
+
+mod_con<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled + edna_conservation ), data=var, family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov_con<-anova(mod_con, resamp="pit.trap", nBoot=1000,cor.type="shrink",p.uni="adjusted", test='score')##
+
+
+## gets error - not sure why uneven block need to use case and case needs LR
+mod_bloc<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled ), data=var, family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov_bloc<-anova(mod_bloc,  nBoot=1000,  cor.type="shrink",p.uni="adjusted", test='LR', block = var$edna_conservation , resamp='case' )## , resamp='case'
+
+
+
+mod_RNA<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled), data=var, subset= (edna_conservation == "RNALater" ), family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov_RNA<-anova(mod_RNA,resamp="pit.trap", nBoot=1000,cor.type="shrink", p.uni="adjusted", test='score')##
+# for pres abs, wald may be bad - try 'score' or 'LR'
+# plot(mod_anov_RNA)
+
+
+mod_DNA<- mvabund::manyglm(mv ~ (bot_temp_mean_scaled   + SST_change_scaled +  par_scaled + pp_mean_scaled + water_depth_scaled), data=var, subset= (edna_conservation == "DNAgard" ), family= binomial("cloglog"), composition= "FALSE", nboot=1000, cor.type="shrink",show.cor=TRUE, nCore=3) # 
+
+mod_anov_DNA<-anova(mod_DNA, resamp="pit.trap",nBoot=1000,cor.type="shrink",p.uni="adjusted",  test='score')##
+
+```
 
 
 
@@ -1954,10 +2082,14 @@ nlevels<-50
 my_palette_p <- colorRampPalette(c("blue","white","red"))(nlevels)  # palette for correlations
 #
 num_clust<-8 # number of clusters for taxa
-# base on t.cn
-x_labels<-c( "Bottom temp.", "PAR", "Primary Prod.","SST change" ,"Water depth") # should be alphabetical, check match order of mult_dat3
+# determine order of variables - mult_dat3
+var_order<-c("bot_temp_mean_scaled" ,"SST_change_scaled" , "par_scaled" ,"pp_mean_scaled", "water_depth_scaled" )
+
+# base on t.cn - names of variables - mult_dat3
+x_labels<-c( "Bottom temp.","SST change", "PAR", "Primary Prod." ,"Water depth") # order must match var_order!!!, check match order of mult_dat3
+
 # set p value minimum fo individual taxa to include in plot
-p_min_val<- 0.2
+p_min_val<- 0.1
 # 
 inner_margins<-c(.3,27,1,1)  # increase left - second number for larger taxa names - oppossite too
 #   # bottom, left, top, and right
@@ -2047,8 +2179,11 @@ mult_dat3 <- data.frame(mult_dat2) %>%    # names(mult_dat2)
   mutate(taxa_cluster_arrange=as.numeric(taxa_cluster_arrange)) %>% 
   arrange(taxa_cluster_arrange, variable) %>% 
   mutate(xx = rep(1:length(x_labels), len=nrow(mult_dat2) ) , yy =rep(1:nrow(clustorder), each=length(x_labels))    ) %>% 
-  mutate(coef_log=if_else( coef>=0, log(coef+1), (log(abs(coef)+1) )*-1    )   )
+  mutate(coef_log=if_else( coef>=0, log(coef+1), (log(abs(coef)+1) )*-1    )   ) %>% 
+  # arrange variables
+  mutate(variable=factor(variable, levels= var_order ) ) 
   
+
 ##################################################
 ##          custamize y-axis names
 ######## match labels from stat to other
@@ -2104,7 +2239,7 @@ mult_plot <- ggplot(mult_dat3, aes(xx, yy) ) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1.5), axis.text.y = element_text(color=y_labels$color),  axis.ticks = element_blank() )
 
 
-ggsave(mult_plot, file=paste(dir,plot_file,"/multvar_taxa_abund.tiff",sep=""), width = 20, height = 25, units = "cm", dpi="print")
+ggsave(mult_plot, file=paste(dir,plot_file,"/multvar_taxa_abund_presabs_0_1.tiff",sep=""), width = 20, height = 25, units = "cm", dpi="print")
 
 
 
@@ -2131,6 +2266,7 @@ var <- dat_rich  # names(var)    env. variables used above too ; from richness g
 cc_name<- data.frame(names(cc)) %>% 
     rename(lineage = names.cc.) 
 
+
 y_labels_mds<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
   ungroup() %>% 
   select(lineage:Species) %>% 
@@ -2155,7 +2291,9 @@ y_labels_mds<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
 
 # example_NMDS <- metaMDS( cc,    k=5 ) # 
 
-example_NMDS <- metaMDS( log(cc+1),    k=5 , trymax=40) # Our community-by-species matrix
+# run analysis. !!!!!!!!
+cc[cc>0] <- 1 # conver to  presence absence
+example_NMDS <- metaMDS( cc,    k=5 , trymax=40) # Our community-by-species matrix
                    # The number of reduced dimensions. Increase if high stress is problem. 
 #"The stress, or the disagreement between 2-D configuration and predicted values from the regression"
 #A good rule of thumb: stress > 0.05 provides an excellent representation in reduced dimensions, > 0.1 is great, >0.2 is good/ok, and stress > 0.3 provides a poor representation
@@ -2165,24 +2303,28 @@ x_let<- -2.05
 y_let<- 1.5
 cex_let <- 1.2
 cex_size<-0.85
+xlim_c <- c(-1,1)
+ylim_c <-  c(-1,1)
 ### 6 plots ?
 # plot(example_NMDS)
 
-pdf(paste0(dir,plot_file,"/arctic_surf_mds_GAMs.pdf" ), width = 10, height = 15 )
+#################.  start plot ###################
+
+pdf(paste0(dir,plot_file,"/arctic_surf_mds_GAMs_presabs.pdf" ), width = 10, height = 15 )
 
 ################
 
 par(mfrow=c(4,2),mar=c(1.5,1.5,1.5,1.5) ,oma=c(3,3,2,2)) 
 
 # sites by numbers
-pl<- ordiplot(example_NMDS,type="n", xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n", xlim=xlim_c , ylim= ylim_c)
 #points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 orditorp(example_NMDS, display="sites",cex=0.95, air=0.01, labels= as.character(var$sample_id_by_lat) ,col=col_y_lab[2]  ) # label sites  # air close to 1 - no overlap, 0 - full overlap
 # , labels= var$sample_id_by_lat
 text(x=x_let, y=y_let, labels="a",cex=cex_let)
 
 # label species
-ordiplot(example_NMDS,type="n", xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+ordiplot(example_NMDS,type="n", xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 orditorp(example_NMDS,display="species",col="grey30",air=0.9, priority= y_labels_mds$priority_abund, labels=y_labels_mds$Family_label, 
    cex=0.95, pcex= 0)
@@ -2191,38 +2333,38 @@ text(x=x_let, y=y_let, labels="b",cex=cex_let)
 ####
 # Use the function ordisurf to plot contour lines
 # LAT
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$lat, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="c",cex=cex_let)
 
 # Sea ICS
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$present_surface_ice_cover_mean, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="d",cex=cex_let)
 
 # temo
 # names(var)pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$present_benthic_mean_depth_temperature_mean ,  main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="e",cex=cex_let)
 
 # sst change
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$linear_change, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="f",cex=cex_let) # var$land_distance
 
 # pp
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$present_surface_primary_productivity_mean, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="g",cex=cex_let)
 
 # depth
-pl<- ordiplot(example_NMDS,type="n",  xlim=c(-1.5,1.5) , ylim=c(-1.5,1.5))
+pl<- ordiplot(example_NMDS,type="n",  xlim= xlim_c , ylim=ylim_c)
 points(pl, "sites", pch=1, col=col_y_lab[2], cex= 0.7)
 ordisurf(example_NMDS,var$water_depth, main="",col="black", cex=1, labcex = cex_size, add = TRUE)
 text(x=x_let, y=y_let, labels="h",cex=cex_let)

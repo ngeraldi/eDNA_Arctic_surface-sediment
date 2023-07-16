@@ -38,7 +38,7 @@ out_file<-"Documents/KAUST/eDNA/R/pipe_summary"
 # export  to project folder
 export_file<-"Documents/KAUST/eDNA/R/csv/"
 # name for csv that you will save at very end
-export_name<-paste(stud_pat,"_filtered_data_all.csv",sep="")
+export_name<-paste(stud_pat,"_filtered_data_all2.csv",sep="")
 # summary_file for summary tables
 summary_file<-"Documents/KAUST/eDNA/eDNA_manuscripts/Arctic surface"
 
@@ -128,7 +128,7 @@ tax_list<-setNames(lapply(f_tax, read.csv), tools::file_path_sans_ext(basename(f
 intersect(primers, names(sam_dat))
 # intersect(primers, names(tax_list))
 
-# get index for insect taxonomy assigned and add taxonomy comparable to assigntaxonomy from DADA2
+# get index for insect taxonomy assigned and add taxonomy comparable to assigntaxonomy from DADA2 - make first letter upper case
 tax_list_insect_num<-grep("insect", names(tax_list))
 # fix taxonomy of insect    match insect name to dada2 naming
 for (i in tax_list_insect_num){
@@ -138,11 +138,13 @@ for (i in tax_list_insect_num){
        mutate(X = taxID) %>%  ## add to match seq from tax assign
         dplyr::select(-representative,-taxID,-taxon,-rank) %>%
        mutate_if(is.factor, as.character) %>% 
-       mutate_at(vars(Superkingdom:Species), list(~na_if(., ""))) %>% # convert blank to NA
-       mutate_at(vars(Superkingdom:Species), funs(ifelse(!is.na(score) &  score < min_insect_score, NA, .))) %>%  ## min score turn taxa blank   -  min_insect_score !is.na(score) & 
-       dplyr::select(-score, -contains("sample1")) ## 3 remove score
-     }
- ## mes1<-tax_list[[10]]       names(mes1)
+       mutate_if(is.logical, as.character) %>%  ####. !!!!  needed if have column of all NA !!! 
+      mutate_at(vars(Superkingdom:Species), list(~na_if(., ""))) %>% # convert blank to NA
+     mutate_at(vars(Superkingdom:Species), funs(ifelse(!is.na(score) &  score < min_insect_score, NA, .))) %>%         ## min score turn taxa blank *** removed becuase error ***  -  min_insect_score !is.na(score) & 
+      dplyr::select(-score, -contains("sample1")) ## 3 remove score   
+     
+}
+ ## mes1<-tax_list[[17]]       names(mes1). 1,5 ,9, 13 , 17
        
 
 # get summary of reads from filter steps of DADA2
@@ -237,9 +239,37 @@ all_index_list<- lapply(sam_list, function(x) {
 
 ### make SV list into LIST of dataframes ######################################
 dat<-purrr::map(sv_list, data.frame)
+
+```
+
+## get cluster seqs (cluster)
+```{r cluster}
+ cluster_dat<- dat# make list
+
+for (i in seq_along(dat)){
+  cluster_dat[[i]]<- seqateurs::cluster_otus(dat[[i]], similarity = 0.97, cores = 4)
+  
+}
+
+#. testing code
+#.  names(dat)
+##   head(dat[[1]])
+## mes<-cluster_dat[[1]]
+#  dum<-as.data.frame(dat[[1]])
+#  mes<- seqateurs::cluster_otus(dum, similarity = 0.97, cores = 4)
+#   mes3<-data.frame(mes$cluster, dum)
+#  mes2<-unique(mes$cluster) # at 90% 1000, at 97% 5506 
+
+```
+
+
+## seq sample add (for cluster)
+```{r seq sample}
 # make rownames a column, rownames were sample identification, which we use sample number  -  mes<-dat[[1]]  mes$sample_num
+# was above clustering but including cluster now it needs to be here - cluster funtion can't have sample id as column
 dat<-purrr::map(dat, function(x) rownames_to_column(x, var="miseq_sample_id"))  #  mes<- rownames(dat[[3]]) names(dat) all_index_list[[3]]
 ```
+
 
 
 
@@ -256,7 +286,7 @@ dat1<- lapply(dat, function(x) {
         x<-data.frame(x)
         #colnames(x)<-paste("X",id, sep="") ;return(x)
         x$seq<-s[-1]  ;return(x)
-        })                # mes<-dat[[5]]   mes[,1]     names(dat1)    #   x<-dat[[3]]  x2<-dat1[[5]] names(x2) names(dat1[[3]])
+        })                # mes<-dat1[[1]]   mes[,1]     names(dat1)    #   x<-dat[[3]]  x2<-dat1[[5]] names(x2) names(dat1[[3]])
 # assign colnames - which are miseq_sample_id
 for (i in seq_along(dat1)){
   colnames(dat1[[i]]) <- c(paste("X_",dat[[i]][,1],sep=""),"seq")
@@ -269,6 +299,7 @@ dat2<-rep(dat1, each=length(minboots))
 minboot_seq<-rep(minboots, times=length(primers))
 primers_seq<-rep(primers, each=length(minboots))
 primers_minboot<-paste(primers_seq,minboot_seq, sep=";")
+
 ############  add with tax_list- for each 
 ####   changed to loop and merge - much safer and not worry about orders - merged on seq. and X
 #dat3<-mapply(cbind,dat2,tax_list, SIMPLIFY=F)   # names(dat3) names(tax_list)  #   x<-dat2[[17]]  x2<-tax_list[[5]]
@@ -292,6 +323,28 @@ for (i in seq_along(dat3)){
 ##     x<-dat3[[1]] names(x)  mes<-x[-which(as.character(x$X) %in% x$seq),]  - mes should have 0 rows!
 # x$X[1]  x$seq[1]
 ```
+
+## add (cluster) numbers
+
+```{r add cluster}
+
+## duplicate cluster to match dat1 which was duped to match tax_list    names(dat1)
+cluster_dat2<-rep(cluster_dat, each=length(minboots))
+
+dat3.5<-dat3    #  i<-9  mess<-cluster_dat2[[2]]  messd<-dat3[[2]]
+# colnames(messd) messd2<-messd[,90:109]
+for (i in seq_along(dat3)){
+  mes<-dat3[[i]]
+  mes1<-cluster_dat2[[i]]
+  mes2<-left_join(mes,mes1[,1:2] , by = c("seq" = "sequence"))
+  dat3.5[[i]]<-mes2
+   }  #  
+
+dat3<-dat3.5
+# messd<-dat3.5[[3]]  messd2<-messd[,90:110]
+```
+
+
 
 ## begin filtering
 
@@ -324,7 +377,7 @@ for (i in seq_along(dat4)){   ##  i<-9   names(dat4[[17]])  names(dat4)
 ##############
 #### remove SV's based on % in samples then by blanks - lapply through all lists 
 
- dat_filt<-dat4   # make copy for next step   names(dat4)  names(dat2[[1]])
+ dat_filt <- dat4   # make copy for next step   names(dat4)  names(dat2[[1]])
 
 # create blank lists for summary
  after_blank_filt <- vector("list", length(names(dat_filt)))# 
@@ -401,15 +454,16 @@ for (i in seq_along(dat4)){   ##  i<-9   names(dat4[[17]])  names(dat4)
       after_taxa_clean1[[i]]<-apply(dat_filt[[i]][,all_index_list[[i]]], 2, sum) 
       after_taxa_clean1_SVsam[[i]]<-apply(dat_filt[[i]][,all_index_list[[i]]], 2, function(x) sum(x > 0)) 
      }
-# x<-dat_filt[[11]]     filter_at(vars(b, c), any_vars(complete.cases(.))   any_vars(!is.na(.))
-
+# x<-dat_filt[[3]]     filter_at(vars(b, c), any_vars(complete.cases(.))   any_vars(!is.na(.))
+#.  lapply(dat_filt, dim)
   
 ```
 
 
 ## sum reads by unique taxa
+#########    !!!!!!!  no longer run.  !!!!!!!!!!!!
  and also gather - first time in long form, but still in list with each df being miseq
-```{r sum_by_taxa}
+```{r sum_by_taxa, eval=FALSE, include=FALSE}
 # sum all reads for each unique taxon and !   gather !!
  dat_filt_taxa<-dat_filt  # mes1<-dat_filt[[2]]  names(dat_filt)
 ### dummy lists
@@ -445,12 +499,56 @@ for (i in seq_along(dat_filt_taxa)){        # i<-12
 
 
 
+## sum by (clusters)/taxa
+ and also gather - first time in long form, but still in list with each df being miseq - changed line 521 and 523
+ 
+```{r sum_by_taxa, echo=FALSE}
+# sum all reads for each unique taxon and !   gather !!
+ dat_filt_taxa<-dat_filt  # mes1<-dat_filt[[2]]  names(dat_filt)
+### dummy lists
+  after_taxa_sum <- vector("list", length(names(dat_filt_taxa)))# for calc of lost SVs
+  names(after_taxa_sum) <- primers_minboot
+    after_taxa_sum_SV_sam <- vector("list", length(names(dat_filt_taxa)))# for calc of lost SVs
+  names(after_taxa_sum_SV_sam) <- primers_minboot
+
+# sum reads by unique taxa within unique miseq runs  and gather
+for (i in seq_along(dat_filt_taxa)){        # i<-12
+  dat_filt_taxa[[i]]<-dat_filt_taxa[[i]] %>% 
+   # mes1<-mes %>% 
+    dplyr::select(-seq.1,-seq) %>% # make sure all columns are numeric after group_by
+    ## unite(lineage, Superkingdom:Species, sep=";",remove=F) %>%
+    ## change for cluster
+    unite(lineage, c('Superkingdom','Kingdom','Phylum','Class','Order','Family','Class','Genus','Species', 'cluster'), sep=";",remove=F) %>%
+    #.  see above, but nothing else
+    dplyr::select(-Superkingdom,-Kingdom, -Phylum,-Class,-Order,-Family,-Genus,-Species, -cluster,-primer,-minboot) %>%  # 
+    group_by_at(vars(lineage,primer_taxassign_id)) %>% 
+    summarise_all(list("sum")) %>%   # get sum for all same taxa
+    gather(key="miseq_sample_id",value="reads", starts_with("X"))  %>% 
+    mutate(miseq_sample_id=gsub("X_","",miseq_sample_id) )  # add sample id column
+  
+  # get richnes of taxa per miseq/taxaassign
+    mes <- dat_filt_taxa[[i]] %>% 
+      filter(reads>0) 
+    after_taxa_sum[[i]]<- length(unique(mes$lineage))
+    # get richnes per sample
+    mes_s<-mes %>% 
+      group_by(primer_taxassign_id, miseq_sample_id) %>% 
+      summarize(SV=n())
+    after_taxa_sum_SV_sam[[i]]<- mes_s[,2:3]
+    
+    }   # names(mes)  mes1<-dat_filt[[2]]   mes<-dat_filt_taxa[[2]]  names(dat_filt_taxa[[3]])  mes<-x$seq[x$seq.1 %in% c(1,8,2)]
+          #  mes<- after_taxa_sum[[22]]  names(dat_filt_taxa)    mes<- after_taxa_sum_SV_sam[[11]]
+```
+
+
+
 ## tidy 2
 bind data into one dataframe and add miseq sample data
 ```{r gather}
   ### simplify list into one dataframe and tidy    ##################################
+ #. dat_filt_taxa_df<-do.call(rbind,dat_filt_taxa)
  dat_filt_taxa_df<-do.call(rbind,dat_filt_taxa)
-
+ 
 #  names(dat_filt_taxa_df)  names(sam2)   names(mes5) unique(dat_filt_taxa_df$sample_id)
 
 ### merge with miseq sample data  - using sam2
@@ -462,13 +560,14 @@ bind data into one dataframe and add miseq sample data
   mutate(sample_id_u=paste(primer,sample_num,minboot,sep=";")) %>%  ## switch unique sample id to num !!!!!!
   #mutate(primer_taxa_assign_id=paste(primer,minboot,sep="_")) %>% 
   mutate(lineage2=make.names(lineage)) %>% 
-   mutate(lineage2=gsub('^X', '', lineage2)) %>% 
+   mutate(lineage2=gsub('^X', '', lineage2)) %>%   # ^ replace everything but x with blank?
    mutate(lineage2=gsub('^\\.+|\\.+$', '', lineage2)) %>%  # remove leading or trailing "."
    group_by(sample_id_u) %>% 
    mutate(sample_sum_after_filt=sum(reads)) %>%  # get sum reads per sample after filter
    ungroup() 
  #  unique(dat_filt_taxa_df$primer)
 #   mes<-dat_filt_taxa_df[dat_filt_taxa_df$primer_taxa_assign_id=="NA_NA",]  # unique(dat_filt_taxa_df$primer_taxa_assign_id)
+  dat_filt_taxa_df$lineage2[1:10]
 ```
 
 
@@ -587,7 +686,7 @@ dat_filt_taxa_df1<-dat_filt_taxa_df %>%
   left_join(rich)
 
 #dat5<-delete.na(dat4, 4)      unique(dat)
-
+#   dat_filt_taxa_df2$lineage[1:10]
 ```
 
 
