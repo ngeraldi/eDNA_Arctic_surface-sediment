@@ -385,7 +385,9 @@ dat_all_filt_combine_prim <- dat_all_filt %>%   # names(dat_all_filt)   unique(d
 ## get marine yes/no
 use worms package to get accepted names
 use warms package to get information including - Kingdom through species
-```{r worms_info}
+
+```{r worms_info, eval=FALSE, include=FALSE}
+
 ##   check and change names in worms     ##################################
 #   library(worrms)
 ## originally from red sea surface analysis
@@ -2199,12 +2201,14 @@ y_labels_make<- taxa_file %>%   # names(taxa_file)    ylabels$lineage_stat
   mutate(lineage_stat= gsub(" ", ".", lineage_stat)) %>% 
   mutate(lineage_stat= gsub("-", ".", lineage_stat)) %>% 
   inner_join(rn) %>% 
-  unite(y_labels, Phylum:Genus , sep=";", remove=FALSE) %>% 
+  unite(y_labels, Phylum:Species , sep=";", remove=FALSE) %>% #. change here for y labels!!!!
   mutate(y_labels=gsub("NA", "Unclassified", y_labels))
  
 y_labels <- clustorder %>% 
     rename(lineage_stat=lineage) %>% 
-    left_join(y_labels_make)
+    left_join(y_labels_make) %>% 
+    mutate(y_labels=gsub("brevicornis brevicornis", "brevicornis", y_labels))
+    
 
 ## !!!!!   make sure length(rn)== length(ylabels$lineage_stat)   #   !!!!!!
 # mes<- rn %>% 
